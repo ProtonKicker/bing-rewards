@@ -28,6 +28,9 @@ Please submit an issue or pull-request if you have an idea for a feature
 * Install as self-contained python application with minimal dependencies (`pynput`)
 * Fine tune delay and set browser executable with [config](#configuration) at `$XDG_CONFIG_HOME` or `%APPDATA%` on Windows
 * Not intended as an automated or headless service. Simply assists with what would regularly be a manual task.
+* **NEW**: Web-based GUI for visual control and monitoring
+* **NEW**: Concurrent execution across 10+ browser instances
+* **NEW**: Create isolated Chromium instances with automatic cleanup
 
 
 > [!Important]
@@ -172,5 +175,12 @@ Then, fork the repository on Github and clone to your machine. The first invocat
 Install the defined pre-commit hooks: `uv run pre-commit install --install-hooks`
 
 Launch bing-rewards in the editable dev environment: `uv run bing-rewards --help`
+
+## Additional Documentation
+
+- **[Web GUI Guide](GETTING_STARTED_GUI.md)** - Complete walkthrough for the web-based control panel
+- **[Isolated Instances](ISOLATED_INSTANCES.md)** - Create independent Chromium instances with auto-cleanup
+- **[Concurrent Mode](CONCURRENT_MODE.md)** - Run 10+ browser instances simultaneously
+- **[Architecture](ARCHITECTURE_ISOLATED_INSTANCES.md)** - System architecture diagrams
 
 Feel free to open a PR against the `master` branch with additional features or fixes!

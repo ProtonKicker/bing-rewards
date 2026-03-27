@@ -1,0 +1,8 @@
+# GUI Dependencies
+flask>=3.0.0
+flask-cors>=4.0.0
+
+# Core dependencies (inherited from main project)
+# pynput~=1.8
+# psutil>=5.9.0
+# rich>=13.0.0

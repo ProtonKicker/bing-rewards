@@ -55,6 +55,18 @@ DESKTOP_AGENT = (
 
 
 @dataclasses.dataclass()
+class ConcurrencyConfig:
+    """Concurrency-specific configuration settings."""
+
+    max_instances: int = 10
+    enable_throttling: bool = True
+    cpu_threshold: float = 80.0
+    memory_threshold: float = 85.0
+    eco_mode: bool = False
+    instance_timeout: int = 600
+
+
+@dataclasses.dataclass()
 class Config:
     """Default settings for file config and types."""
 
@@ -72,6 +84,10 @@ class Config:
     exit: bool = True
     ime: bool = False
     profile: list[str] = dataclasses.field(default_factory=lambda: ['Default'])
+    # Concurrency settings
+    concurrency: ConcurrencyConfig = dataclasses.field(
+        default_factory=ConcurrencyConfig
+    )
 
 
 def parse_args() -> Namespace:
@@ -180,6 +196,45 @@ def parse_args() -> Namespace:
         type=str,
         nargs='+',
     )
+    # Concurrency mode options
+    p.add_argument(
+        '-C',
+        '--concurrent',
+        help='Enable concurrent multi-instance mode (default: sequential)',
+        action='store_true',
+    )
+    p.add_argument(
+        '--max-instances',
+        help='Maximum number of parallel browser instances (default: 10)',
+        type=int,
+        default=10,
+    )
+    p.add_argument(
+        '--list-profiles',
+        help='List available Chrome profiles and exit',
+        action='store_true',
+    )
+    p.add_argument(
+        '--manual-login',
+        help='Launch browsers for manual authentication without searching',
+        action='store_true',
+    )
+    p.add_argument(
+        '--no-throttle',
+        help='Disable automatic resource throttling',
+        action='store_true',
+    )
+    p.add_argument(
+        '--eco-mode',
+        help='Use conservative resource limits for lower system impact',
+        action='store_true',
+    )
+    p.add_argument(
+        '--instance-timeout',
+        help='Timeout per browser instance in seconds (default: 600)',
+        type=int,
+        default=600,
+    )
     args = p.parse_args()
     return args
 
@@ -271,5 +326,23 @@ def get_options() -> Namespace:
     # Ensure all boolean options are set
     result.no_window = not result.window
     result.no_exit = not result.exit
+
+    # Setup concurrency settings from CLI flags
+    # Handle case where concurrency might be a dict from JSON deserialization
+    if not hasattr(result, 'concurrency') or result.concurrency is None:
+        result.concurrency = ConcurrencyConfig()
+    elif isinstance(result.concurrency, dict):
+        # Convert dict to ConcurrencyConfig object
+        result.concurrency = ConcurrencyConfig(**result.concurrency)
+
+    # Override concurrency settings from CLI
+    if args.max_instances:
+        result.concurrency.max_instances = args.max_instances
+    if args.no_throttle:
+        result.concurrency.enable_throttling = False
+    if args.eco_mode:
+        result.concurrency.eco_mode = True
+    if args.instance_timeout:
+        result.concurrency.instance_timeout = args.instance_timeout
 
     return result
