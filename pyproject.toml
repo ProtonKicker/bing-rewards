@@ -2,16 +2,17 @@
   name = "bing-rewards"
   version = "3.3.0"
   requires-python = ">=3.10,<3.16"
-  description = "Perform automated Bing Rewards searches"
+  description = "Closed-loop Bing Rewards collector for Firefox: verifies every search registered"
   readme = "README.md"
   license = "MIT"
   license-files = ["LICENSE"]
   authors = [
     { name = "jack-mil" },
   ]
-  keywords = ["automation", "bing", "search", "pynput"]
+  keywords = ["automation", "bing", "search", "firefox", "selenium", "rewards"]
   classifiers = [
     "Topic :: Utilities",
+    "Operating System :: MacOS",
     "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
     "Intended Audience :: End Users/Desktop",
@@ -22,7 +23,7 @@
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
   ]
-  dependencies = ["pynput~=1.8"]
+  dependencies = ["selenium>=4.15,<5"]
 
   [project.urls]
     Source = "https://github.com/jack-mil/bing-rewards"

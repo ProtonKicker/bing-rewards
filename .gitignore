@@ -60,3 +60,6 @@ venv.bak/
 
 # BE GONE MAC-OS!
 .DS_Store
+
+# local daily run logs (personal points data)
+runs/

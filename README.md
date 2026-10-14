@@ -1,176 +1,127 @@
-# Bing-Rewards
+# Bing Rewards — Closed-Loop Collector (Firefox, macOS)
 
-<div align="center">
-<img alt="PyPI - Python Version" src="https://img.shields.io/pypi/pyversions/bing-rewards?style=flat-square&label=Python&logo=python&logoColor=yellow">
-<a href="https://pypi.org/p/bing-rewards/"> <img alt="PyPi" src="https://img.shields.io/pypi/v/bing-rewards?label=PyPI&style=flat-square&logo=pypi&logoColor=yellow"></a>
-<a href="https://pypi.org/p/bing-rewards/"> <img alt="PyPI - Downloads" src="https://img.shields.io/pypi/dm/bing-rewards?style=flat-square&label=Downloads&color=orange"></a>
-<br>
-<img alt="PyPI - License" src="https://img.shields.io/pypi/l/bing-rewards?style=flat-square&label=License&color=blueviolet">
-</div>
+A rewrite of [jack-mil/bing-rewards](https://github.com/jack-mil/bing-rewards)
+for Firefox on macOS that **verifies its own work**. The upstream tool types N
+searches and hopes for the best (open-loop). This version reads your live
+points balance before and after every batch, retries when searches stop
+registering, stops early when the day is done, and ends with a clear
+SUCCESS / PARTIAL / FAIL verdict.
 
-### A CLI app to perform Bing searches
-Please submit an issue or pull-request if you have an idea for a feature
+One command each morning:
 
-- [Features](#features)
-- [Installation](#installation)
-- [Dependencies](#dependencies)
-- [Usage](#usage)
-- [Options](#options)
-- [Config](#config)
-- [Development](#development)
-
-
-## Features
-
-* Enter random search queries into your browser *a-la* Auto Hotkey.
-* Use a mobile user agent to get mobile points (`--mobile`)
-* Configurable number of searches with `--count=`
-* Install as self-contained python application with minimal dependencies (`pynput`)
-* Fine tune delay and set browser executable with [config](#configuration) at `$XDG_CONFIG_HOME` or `%APPDATA%` on Windows
-* Not intended as an automated or headless service. Simply assists with what would regularly be a manual task.
-
-
-> [!Important]
-> This was originally created in a different age, when Bing & MS was much simpler and less bloated with AI ~~slop~~ tools. Users have reported a wide variety of success on whether this method works at all with the new systems. See some of the pinned or closed issues for reports from others that may improve success. I maintain the *code* in a working state as an excersie in Python packaging, but do *not* personally use the utility, and **cannot guarantee this method will even generate points anymore**!
-
-## Installation
-Bing-rewards is a CLI application distributed on PyPI. You can install it however you prefer to manage Python applications on your system. I recommend `pipx` or `uv`.
-
-### With [`pipx`](https://pipx.pypa.io/stable/) or `pip`
-```bash
-pipx install bing-rewards
-```
-
-### With [`uv`](https://docs.astral.sh/uv/getting-started/installation/)
 ```sh
-uv tool install bing-rewards
+uv run bing-rewards
 ```
 
-These commands will make the executable `bing-rewards` available on your PATH.
-Look below or try the `--help` flag to see detailed usage.
+## What "closed-loop" means here
 
-> [!Tip]
-> Use a virtual environment or [`pipx`](https://pypa.github.io/pipx/) to avoid polluting your global package space with executable apps. See: [pipx](https://pypa.github.io/pipx/)
+| Stage | Verification |
+|---|---|
+| Launch | Firefox starts against a **clone** of your logged-in profile — your real profile is never touched |
+| Sign-in gate | The Bing account avatar must be present and auth cookies (`WLS`, `_U`, `RPSSecAuth`, …) detected — otherwise the run **stops before wasting a single search** |
+| Points before | Live balance read from the rewards medallion (`#rh_rwm`) embedded in Bing pages (base64 JSON, authoritative), with legacy user-status API and DOM fallbacks |
+| Per batch | After every `--batch-size` searches (default 5) the balance is re-read; if it didn't move, the batch is retried once with fresh queries and longer delays, then the round is declared stalled and stopped |
+| Quota | When the live search-card progress is readable, the round stops at the real daily cap; when it isn't (some markets), fallback targets are used (30 desktop / 10 mobile) |
+| Mobile | Second round with a phone user-agent + viewport via `general.useragent.override`; same point-delta verification, honestly reported |
+| Idempotency | A JSON log per day (`runs/YYYY-MM-DD.json`) records registered/complete rounds — running twice doesn't redo what worked |
+| Report | Points before → after, per-round attempted/registered/wasted, notes, verdict + reasons, exit code (0/1/2) |
 
-### Locally
-Clone the repo and install locally. See: [Developing](#development--contribution)
+Example report:
 
-## Dependencies
+```
+==========================================================
+  BING REWARDS RUN REPORT — 2026-10-14  ⚠️  PARTIAL
+==========================================================
+  points: 4773 -> 4793  (+20)
+  desktop : attempted 2, registered 2, wasted 0
+    • --max-searches 2 reached
+    • live quota unreadable; using fallback target 30
+    • using point deltas (search counter unavailable)
+----------------------------------------------------------
+  reason: registered 2 of 2 attempted searches
+  run log: runs/2026-10-14.json
+==========================================================
+```
 
-- At least Python 3.10
+## Screenshots (real run, macOS Ventura + Firefox 158)
 
-- [pynput](https://github.com/moses-palmer/pynput) (installed with package). Used to control keypresses and type Bing search URLS.
-  > [!Warning]
-  >  Bing-Rewards *will* take control away from the keyboard while running. **Pynput** performs key presses. i.e., it does not operate headless or in the background.
+Browser launched on the cloned profile, before the first search, and after a
+verified batch — note the live points counter (4793) in the top-right medallion:
 
-- `chrome` must be discoverable on the system PATH. [Download Google Chrome](https://www.google.com/intl/en/chrome/).
-  If your Chromium based browser has a different name use the `--exe` flag with an absolute path to the browser executable to use (e.g. `--exe=$(which brave-browser)`).
-  See also: `"browser-path"` option in the [config](#configuration) file.
+| Launched | Before | After (+20 pts) |
+|---|---|---|
+| ![launched](docs/screenshots/152731-desktop-launched.png) | ![before](docs/screenshots/152733-desktop-before.png) | ![after](docs/screenshots/152756-desktop-after.png) |
 
-- To earn points from searching, you *must* also have logged into [bing.com](https://www.bing.com) with your Microsoft account at least once, to save cookies.
+Screenshots are window-scoped (captured through the WebDriver, not the whole
+desktop) so no personal screen content is ever committed.
+
+## Requirements
+
+- macOS (developed/verified on Ventura 13, Intel)
+- [Firefox](https://www.mozilla.org) logged into Bing with your Microsoft account
+  in the `default-release` profile (override with `--profile <name>`)
+- [uv](https://docs.astral.sh/uv/) (or any Python ≥3.10)
+- `geckodriver` — resolved automatically by Selenium Manager on first run, or
+  install explicitly: `brew install geckodriver` and pass `--geckodriver /usr/local/bin/geckodriver`
 
 ## Usage
 
-> [!Tip]
-> Press <kbd>ESC</kbd> to exit early and regain control
-
-Complete mobile and desktop daily points
-
-`$ bing-rewards`
-
-Run 10 searches with mobile user-agent in a new window
-
-`$ bing-rewards -m -c10`
-
-`$ bing-rewards --mobile --count=10`
-
-Complete mobile and desktop daily points using specified Chrome profile "Profile 1"
-
-`$ bing-rewards --profile "Profile 1"`
-
-Run searches sequentially across multiple Chrome profiles
-
-`$ bing-rewards --profile "Default" "Profile 1" "Profile 2"`
-
-Launches Chrome as a subprocess with special flags. Tested on Windows 10 and Linux (Ubuntu + Arch), however it should work on Mac OS as well.
-
-> [!Warning]
-> No other instance of chrome.exe can be open when the script runs. Chrome prevents different user agents in each window. The script will run, but Chrome will not appear as Edge
-
-
-## Options
-
-Running with no options will complete mobile and desktop daily search quota.
-The following options are available to change the default behavior.
-Options supplied at execution time override any config.
-| Flag                       | Option                                                                                                 |
-| -------------------------- | ------------------------------------------------------------------------------------------------------ |
-| `-h`, `--help`             | Display help and exit                                                                                  |
-| `-c`, `--count=N`          | Override the number of searches to complete                                                            |
-| `-b`, `--bing`             | Use this flag if Bing is already your default search engine. Bypasses constructing a bing.com URL      |
-| `-d`, `--desktop`          | Only use desktop user agent                                                                            |
-| `-m`, `--mobile`           | Only use a mobile user agent                                                                           |
-| `-n`, `--dryrun`           | Do everything but type the search query                                                                |
-| `--exe PATH`               | The full path of the Chrome compatible browser executable (Brave and Chrome tested)                    |
-| `--load-delay SEC`         | Override the time given to Chrome to load in seconds                                                   |
-| `--search-delay MIN[,MAX]` | Set the time between individual searches, in seconds. Can specify a range to get random delays         |
-| `--open-rewards`           | Open the rewards page at the end of the run                                                            |
-| `--nowindow`               | Don't open a new Chrome window, just type the keys                                                     |
-| `-X`, `--no-exit`          | Do not close the browser after completing a search                                                     |
-| `--profile`                | Run searches using specified Chrome profile(s). Multiple profiles can be specified to run sequentially |
-| `--ime`                    | Triggers Windows IME to switch to English input by pressing "shift"                                    |
-
-## Config
-A config file is also generated in $XDG_CONFIG_HOME or %APPDATA% on Windows
-where precise delay modifications can be made. If updates make changes to the default configs, you will have to remove and regenerate the file.
-
-Example config `~/.config/bing-rewards/config.json`
-```json
-{
-    "desktop_count": 30,
-    "mobile_count": 20,
-    "load_delay": 1.5,
-    "search_delay": 2,
-    "search_url": "https://www.bing.com/search?FORM=CHROMN&q=",
-    "desktop_agent": "Mozilla/5.0 ... <snip>",
-    "mobile_agent": "Mozilla/5.0 (Windows Phone 10.0; Android 6.0.1) ... <snip>",
-    "browser_path": "C:\\Program Files (x86)\\BraveSoftware\\Brave-Browser\\Application\\brave.exe"
-}
+```sh
+uv run bing-rewards                 # full daily collection (desktop + mobile)
+uv run bing-rewards -n              # DRY RUN: whole loop against a mock account, burns nothing
+uv run bing-rewards --max-searches 3 -d   # small live smoke test, desktop only
+uv run bing-rewards --force         # ignore today's run log and redo rounds
 ```
-Delay timings are in seconds.
-> [!Note]
-> The format has slightly changed in version >= 3.0, so delete and regenerate accordingly.
 
-### User agents
+Useful flags: `--delay 6,12` (randomized inter-search delay), `--batch-size`,
+`--mobile-count/--desktop-count` (fallback targets), `--headless`,
+`--no-screenshots`, `--runs-dir`, `-v`.
 
-The default user agents that are passed to the Chrome process are below.
-You may want to experiment with different user agents, or update versions accordingly.
-Alternate user agents can be set in the config file.
+## Why Selenium + geckodriver (not Playwright)
 
-Edge Browser on Windows 10 desktop:
-> Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edge/126.0.0.0
+Playwright's Firefox build is a special distribution that cannot attach to
+your real user profile, and its `-juggler` mode is not a supported public API.
+geckodriver drives the stock Firefox.app and accepts any profile directory, so
+we clone `default-release` (cookies included) to a temp dir per run: searches
+count toward your account, your daily-use profile is never mutated, and a
+corrupted automation session can't break your browsing.
 
-Mobile Edge Browser on Pixel 6 phone:
->  Mozilla/5.0 (Linux; Android 14; Pixel 6 Build/AP2A.240605.024) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36 Edge/121.0.2277.138
+## Design notes & known limits
 
-
-## Words
-The [keywords](https://web.archive.org/web/20220523083250/https://www.myhelpfulguides.com/keywords.txt) included in this repo where taken from this site
-[https://www.myhelpfulguides.com/2018/07/19/bing-rewards-auto-searcher-with-python-3/](https://web.archive.org/web/20220331033847/https://www.myhelpfulguides.com/2018/07/19/bing-rewards-auto-searcher-with-python-3/).
-
-Their script provided the original inspiration but has since been completely rewritten and expanded.
-The original author was contacted for the source of keywords, but declined to respond
+- **Profile cloning**: cookies are copied, so logins work. If Firefox is
+  *running* while a run starts, the clone can lag behind the newest cookies —
+  the tool warns and the sign-in gate catches it (stops instead of searching
+  against a logged-out session). Best results: quit Firefox before the run.
+- **Balance lag**: Bing's displayed balance updates slightly behind reality;
+  point *deltas* per batch are what the loop relies on, so this only affects
+  the absolute before/after numbers by at most one batch.
+- **Per-card progress** comes from the legacy `rewards.bing.com` user-status
+  API. Some markets (including the one this was built on) now 404 that portal;
+  the collector then verifies via point deltas and uses fallback targets.
+- **Mobile UA spoofing** is the standard approach (as upstream) but is
+  unofficial; if Bing doesn't credit those searches, the closed loop reports
+  the mobile round as stalled rather than pretending success.
+- **Quiz/daily activities**: not implemented (stretch goal).
 
 ## Development
 
-This project is managed by the [`uv`](https://docs.astral.sh/uv) toolchain.
-Ensure you have `uv` installed on your system. This is probably available in your package manager,
-or can be installed with `pip` or `pipx`
+```sh
+uv sync
+uv run python -m bing_rewards -n       # exercise the loop, no real searches
+uv run python -m unittest discover -s tests
+uv run ruff check bing_rewards tests
+```
 
-Then, fork the repository on Github and clone to your machine. The first invocation of any `uv` command will install the `bing-rewards` package in editable mode, with the dev dependencies (`ruff` and `pre-commit`) automatically.
+Layout: `firefox.py` (profile clone, driver, sign-in gate) → `collector.py`
+(batch loop, retry/stall logic) → `rewards.py` (status readers) →
+`runlog.py` (daily JSON log) → `app.py` (CLI, verdict report). `mock.py`
+implements the same session interface for dry runs.
 
-Install the defined pre-commit hooks: `uv run pre-commit install --install-hooks`
+See [FORK_ANALYSIS.md](FORK_ANALYSIS.md) for what the old fork contained
+(web GUI, concurrent multi-instance mode, ~13k lines of AI session notes) and
+why everything was deleted in favor of this clean base, and
+[QUEST.md](QUEST.md) for the original spec.
 
-Launch bing-rewards in the editable dev environment: `uv run bing-rewards --help`
+## License
 
-Feel free to open a PR against the `master` branch with additional features or fixes!
+MIT — same as upstream. Credit: [jack-mil/bing-rewards](https://github.com/jack-mil/bing-rewards).
