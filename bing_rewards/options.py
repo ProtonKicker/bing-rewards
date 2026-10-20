@@ -27,6 +27,16 @@ RETRY_ROUNDS = 1
 
 BING_SEARCH_URL = 'https://www.bing.com/search?form=QBRE&q='
 
+# Consecutive unverifiable batches before the collector treats the round as
+# stalled and stops (prevents an infinite loop when the rewards page never
+# returns a readable signal).
+MAX_NO_SIGNAL_BATCHES = 5
+
+# Hard-cap multiplier: when --max-searches is unset the collector still needs
+# an absolute ceiling so a fully silent Bing page cannot loop forever. The per
+# round effective cap is target * DEFAULT_SEARCH_CAP_MULTIPLIER.
+DEFAULT_SEARCH_CAP_MULTIPLIER = 3
+
 # User agent used for the mobile round (general.useragent.override on Firefox).
 # Makes the session look like an Edge-on-Android phone so mobile points count.
 MOBILE_AGENT = (

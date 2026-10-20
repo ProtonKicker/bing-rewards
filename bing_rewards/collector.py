@@ -137,19 +137,24 @@ def run_round(  # noqa: PLR0912, PLR0915 - the verify/retry state machine is one
     registered_total = 0
     attempted = 0
     stall_handled = False
+    no_signal_batches = 0
+    # Absolute ceiling so a fully silent Bing page cannot loop forever, even
+    # when --max-searches is not given.
+    effective_max = opts.max_searches
+    if effective_max is None:
+        effective_max = result.target * opts_mod.DEFAULT_SEARCH_CAP_MULTIPLIER
 
     while True:
         remaining = result.target - (last_counter if last_counter is not None else registered_total)
         if remaining <= 0:
             result.complete = True
             break
-        if opts.max_searches is not None and attempted >= opts.max_searches:
-            result.notes.append(f'--max-searches {opts.max_searches} reached')
+        if attempted >= effective_max:
+            result.notes.append(f'absolute search cap {effective_max} reached')
             break
 
         batch = min(opts.batch_size, remaining)
-        if opts.max_searches is not None:
-            batch = min(batch, opts.max_searches - attempted)
+        batch = min(batch, effective_max - attempted)
         for _ in range(batch):
             query = queries.next()
             session.search(query)
@@ -173,18 +178,33 @@ def run_round(  # noqa: PLR0912, PLR0915 - the verify/retry state machine is one
             registered_total += min(counter_delta, batch)
             last_counter = after.counter(kind) or last_counter
             rlog.registered = registered_total
+            no_signal_batches = 0
         elif points_delta is not None and points_delta > 0:
             # Counter missing: treat any point gain as the batch registering.
             registered_total += batch
             rlog.registered = registered_total
+            no_signal_batches = 0
             if after.progress(kind).maximum is None:
                 result.notes.append('using point deltas (search counter unavailable)')
         elif counter_delta is None and points_delta is None:
             # Unverifiable batch (no numeric signal at all): set a fresh
-            # baseline rather than penalizing it as a stall.
+            # baseline rather than penalizing it as a stall, but cap retries
+            # so a persistently silent page cannot loop forever.
             last_counter = after.counter(kind)
             last_points = after.points
-            log.event(f'{kind}: no verification signal from {after.source} read; baseline reset')
+            no_signal_batches += 1
+            log.event(
+                f'{kind}: no verification signal from {after.source} read; '
+                f'baseline reset ({no_signal_batches}/{opts_mod.MAX_NO_SIGNAL_BATCHES})'
+            )
+            if no_signal_batches >= opts_mod.MAX_NO_SIGNAL_BATCHES:
+                result.notes.append(
+                    f'stalled: {no_signal_batches} consecutive batches without any '
+                    f'verification signal — rewards page is unreadable'
+                )
+                result.stalled = True
+                rlog.stalled = True
+                break
             continue
         else:
             # Nothing registered this batch.
