@@ -47,6 +47,9 @@ class MockSession:
             return True, 'mock session (signed in)'
         return False, 'mock session configured to be signed out'
 
+    def rewards_healthy(self) -> bool:
+        return True  # mock account is always healthy
+
     def status(self) -> rewards.Status:
         status = rewards.Status(source='api', points=self._state['points'])
         status.desktop = rewards.Progress(self._state['desktop'], DESKTOP_MAX)

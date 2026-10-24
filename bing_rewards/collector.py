@@ -28,11 +28,22 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Rewards page health-check: if the dashboard shows one of these, it is
+# unreadable and all verification signals will fail.
+UNSUPPORT_MARKERS = (
+    'does not support your browser',
+    'rewards error',
+    'something went wrong',
+    'not supported',
+)
+
 
 class Session(Protocol):
     name: str
+    driver: object | None = None  # RealSession has it; MockSession does not
 
     def signed_in(self) -> tuple[bool, str]: ...
+    def rewards_healthy(self) -> bool: ...
     def status(self) -> rewards.Status: ...
     def search(self, query: str) -> None: ...
 
@@ -52,9 +63,19 @@ class RealSession:
 
     def search(self, query: str) -> None:
         url = opts_mod.BING_SEARCH_URL + urllib.parse.quote_plus(query)
-        self.driver.get(url)
+        try:
+            self.driver.get(url)
+        except Exception as exc:
+            # A busted navigation (e.g. geckodriver "network protocol error")
+            # poisons the WebDriver for the rest of the session — re-raise so
+            # the outer loop can decide whether to restart.
+            raise RuntimeError(f'navigation failed for "{query}": {exc}') from exc
         # Dwell on results like a reader, then let the point event settle.
         time.sleep(random.uniform(2.5, 6.0))
+
+    def rewards_healthy(self) -> bool:
+        """Check if the rewards dashboard is readable (not blocked/errored)."""
+        return _rewards_page_healthy(self.driver)
 
     def take_screenshot(self, path: str) -> bool:
         """Window-scoped capture: never includes the user's desktop."""
@@ -131,6 +152,25 @@ def run_round(  # noqa: PLR0912, PLR0915 - the verify/retry state machine is one
     if shutter:
         shutter.capture(f'{kind}-before', session)
 
+    # Warmup: brief pause to let session cookies/initial page state settle
+    # before the first search request.  Avoids the "first search is always
+    # wasted" observation from short runs.
+    time.sleep(opts_mod.WARMUP_DELAY)
+
+    # Early health check: verify rewards page is readable before burning
+    # searches.  If the dashboard shows an "unsupported" / "error" page,
+    # abort immediately instead of wasting a full round.
+    if not _rewards_page_healthy(session):
+        result.notes.append(
+            'rewards page unhealthy before first search — aborting to avoid wasted searches'
+        )
+        result.stalled = True
+        rlog.stalled = True
+        log.event(f'{kind}: rewards page unhealthy — aborting round early')
+        if shutter:
+            shutter.capture(f'{kind}-unhealthy', session)
+        return result
+
     queries = QueryGenerator()
     last_counter: int | None = before.counter(kind)
     last_points: int | None = before.points
@@ -138,6 +178,7 @@ def run_round(  # noqa: PLR0912, PLR0915 - the verify/retry state machine is one
     attempted = 0
     stall_handled = False
     no_signal_batches = 0
+    zero_delta_batches = 0
     # Absolute ceiling so a fully silent Bing page cannot loop forever, even
     # when --max-searches is not given.
     effective_max = opts.max_searches
@@ -157,11 +198,21 @@ def run_round(  # noqa: PLR0912, PLR0915 - the verify/retry state machine is one
         batch = min(batch, effective_max - attempted)
         for _ in range(batch):
             query = queries.next()
-            session.search(query)
+            try:
+                session.search(query)
+            except RuntimeError as e:
+                # Unrecoverable navigation error — quit this round.
+                result.notes.append(f'navigation died mid-batch: {e}')
+                log.event(f'{kind}: {e} — stopping round')
+                result.stalled = True
+                rlog.stalled = True
+                break
             attempted += 1
             rlog.attempted += 1
             logger.debug('%s search %d: %s', kind, attempted, query)
             _delay(opts)
+        if result.stalled:
+            break
 
         after = session.status()
         counter_delta = _progress_delta(kind, before, last_counter, after)
@@ -178,41 +229,57 @@ def run_round(  # noqa: PLR0912, PLR0915 - the verify/retry state machine is one
             registered_total += min(counter_delta, batch)
             last_counter = after.counter(kind) or last_counter
             rlog.registered = registered_total
+            zero_delta_batches = 0
             no_signal_batches = 0
         elif points_delta is not None and points_delta > 0:
             # Counter missing: treat any point gain as the batch registering.
             registered_total += batch
             rlog.registered = registered_total
+            zero_delta_batches = 0
             no_signal_batches = 0
             if after.progress(kind).maximum is None:
                 result.notes.append('using point deltas (search counter unavailable)')
-        elif counter_delta is None and points_delta is None:
-            # Unverifiable batch (no numeric signal at all): set a fresh
-            # baseline rather than penalizing it as a stall, but cap retries
-            # so a persistently silent page cannot loop forever.
+        elif (counter_delta is None and points_delta is None) or (points_delta is not None and points_delta == 0):
+            # Unverifiable batch (no numeric signal at all), or medallion balance
+            # reported zero change. The medallion cache can lag the actual balance
+            # by tens of seconds — treat 0-delta batches as "no signal" for up to
+            # MAX_NO_SIGNAL_BATCHES before declaring a stall, rather than
+            # burning the round on the very first quiet batch.
             last_counter = after.counter(kind)
             last_points = after.points
-            no_signal_batches += 1
+            if points_delta == 0:
+                zero_delta_batches += 1
+            else:
+                no_signal_batches += 1
+            total_quiet = zero_delta_batches + no_signal_batches
             log.event(
-                f'{kind}: no verification signal from {after.source} read; '
-                f'baseline reset ({no_signal_batches}/{opts_mod.MAX_NO_SIGNAL_BATCHES})'
+                f'{kind}: batch #{total_quiet} with no increment '
+                f'(source={after.source}, counter_delta={counter_delta}, '
+                f'points_delta={points_delta})'
             )
-            if no_signal_batches >= opts_mod.MAX_NO_SIGNAL_BATCHES:
+            # On mobile the medallion may not render on search-result pages.
+            if kind == 'mobile' and total_quiet >= 2:
+                try:
+                    session.driver.get('https://www.bing.com/')
+                    time.sleep(2.0)
+                except Exception:
+                    pass
+            if total_quiet >= opts_mod.MAX_NO_SIGNAL_BATCHES:
                 result.notes.append(
-                    f'stalled: {no_signal_batches} consecutive batches without any '
-                    f'verification signal — rewards page is unreadable'
+                    f'stalled: {total_quiet} consecutive batches without increment '
+                    f'(medallion may be cached) — stopping round'
                 )
                 result.stalled = True
                 rlog.stalled = True
                 break
             continue
         else:
-            # Nothing registered this batch.
+            # Negative counter/points delta (shouldn't happen normally).
             if not stall_handled and opts.retry_rounds > 0:
                 stall_handled = True
                 queries.fresh()
-                result.notes.append('batch stalled; retrying with fresh queries + longer delays')
-                log.event(f'{kind}: stall detected, retrying batch')
+                result.notes.append('anomalous delta; retrying with fresh queries + longer delays')
+                log.event(f'{kind}: anomalous delta, retrying batch')
                 _delay(opts, penalty=3.0)
                 continue
             result.stalled = True
@@ -252,6 +319,32 @@ def _progress_delta(
     if base is None:
         return None
     return cur - base
+
+
+def _rewards_page_healthy(driver) -> bool:
+    """Navigate to rewards.bing.com and confirm the dashboard is readable.
+
+    Takes the raw driver (not a Session) so it can be called directly from
+    RealSession.  Returns False if the page shows an 'unsupported browser',
+    'Rewards Error', or any known blocking message.  The caller uses this to
+    abort a round immediately instead of burning searches on a dead session.
+    """
+    try:
+        driver.get(rewards.REWARDS_URL)
+        time.sleep(2.0)
+        page = (driver.page_source or '').lower()
+        # Also check the medallion — if it's present, the page is usable.
+        has_medallion = 'rh_rwm' in page or 'rewards-medallion' in page
+        has_blocker = any(marker in page for marker in UNSUPPORT_MARKERS)
+        if has_blocker and not has_medallion:
+            logger.warning(
+                'rewards page blocked: found error markers (no medallion present)'
+            )
+            return False
+        return True
+    except Exception as e:  # noqa: BLE001
+        logger.debug('rewards health check failed: %s', e)
+        return True  # optimistic: let the status-based flow decide
 
 
 def _points_delta(last: int | None, now: int | None) -> int | None:

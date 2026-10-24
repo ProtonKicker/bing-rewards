@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 from bing_rewards import options as opts_mod
 from bing_rewards.collector import RealSession, RoundResult, run_round
+from bing_rewards.daily_set import DailySetResult, run_daily_set
 from bing_rewards.firefox import (
     clone_profile,
     find_profile_directory,
@@ -42,10 +43,20 @@ def main(argv: list[str] | None = None) -> int:
     log = load_or_start(opts.runs_dir)
     shutter = Shutter(None if opts.dry_run else opts.screenshots_dir)
 
+    daily_set_result = None
     results = _run_dry(opts, log) if opts.dry_run else _run_real(opts, log, shutter)
 
+    # In real mode, run Daily Set completion after search rounds
+    # (uses the last active driver session if possible).
+    if not opts.dry_run and results:
+        # Pick the last driver that was active — search rounds already quit
+        # their drivers, so we need a fresh session.
+        last_round = results[-1]
+        if last_round.signed_in:
+            daily_set_result = _run_daily_set_session(opts, log, shutter)
+
     log.save()
-    return _report(log, results)
+    return _report(log, results, daily_set_result)
 
 
 def _rounds(opts: opts_mod.Options) -> list[str]:
@@ -64,9 +75,15 @@ def _run_real(opts: opts_mod.Options, log: RunLog, shutter: Shutter) -> list[Rou
     cloned = clone_profile(profile_src)
     try:
         for kind in _rounds(opts):
-            ua = None if kind == 'desktop' else opts_mod.MOBILE_AGENT
+            mobile_ua = opts_mod.MOBILE_AGENT if kind == 'mobile' else None
+            desktop_ua = opts_mod.DESKTOP_AGENT if kind == 'desktop' else None
             logger.info('starting Firefox for the %s round', kind)
-            driver = start_driver(cloned, mobile_user_agent=ua, options=opts)
+            driver = start_driver(
+                cloned,
+                mobile_user_agent=mobile_ua,
+                desktop_user_agent=desktop_ua,
+                options=opts,
+            )
             try:
                 session = RealSession(driver, kind)
                 shutter.capture(f'{kind}-launched', session)
@@ -83,6 +100,42 @@ def _run_real(opts: opts_mod.Options, log: RunLog, shutter: Shutter) -> list[Rou
     return results
 
 
+def _run_daily_set_session(
+    opts: opts_mod.Options, log: RunLog, shutter: Shutter
+) -> DailySetResult | None:
+    """Launch a fresh Firefox session just for Daily Set completion.
+
+    Daily Set pages use desktop UA; we don't need a mobile viewport. Returns
+    None if the session cannot even sign in.
+    """
+    profile_src = find_profile_directory(opts.profile_name)
+    cloned = clone_profile(profile_src)
+    driver = None
+    try:
+        logger.info('starting Firefox for Daily Set round')
+        driver = start_driver(
+            cloned,
+            desktop_user_agent=opts_mod.DESKTOP_AGENT,
+            options=opts,
+        )
+        session = RealSession(driver, 'desktop')
+        ok, detail = session.signed_in()
+        if not ok:
+            log.event(f'Daily Set: NOT signed in ({detail}) — aborting')
+            return None
+        result = run_daily_set(driver)
+        log.event(f'Daily Set: {result.summary()}')
+        return result
+    except Exception as e:  # noqa: BLE001
+        logger.warning('daily-set run failed: %s', e)
+        log.event(f'Daily Set: failed — {e}')
+        return None
+    finally:
+        if driver:
+            quit_driver(driver)
+        shutil.rmtree(cloned.parent, ignore_errors=True)
+
+
 def _run_dry(opts: opts_mod.Options, log: RunLog) -> list[RoundResult]:
     print('*** DRY RUN — no real searches, simulated rewards account ***')
     opts.min_delay = 0.0  # a mock run should finish in seconds
@@ -95,7 +148,9 @@ def _run_dry(opts: opts_mod.Options, log: RunLog) -> list[RoundResult]:
     return results
 
 
-def _report(log: RunLog, results: list[RoundResult]) -> int:
+def _report(
+    log: RunLog, results: list[RoundResult], daily_set_result: DailySetResult | None = None
+) -> int:
     verdict, reasons = _verdict(results)
     print()
     print('=' * 58)
@@ -115,6 +170,15 @@ def _report(log: RunLog, results: list[RoundResult]) -> int:
             tag = ' [COMPLETE]' if r.complete else ' [STALL]' if r.stalled else ''
             state = f'attempted {r.attempted}, registered {r.registered}, wasted {r.wasted}{tag}'
         print(f'  {r.kind:<8}: {state}')
+    if daily_set_result is not None:
+        pts_str = ''
+        if daily_set_result.points_earned is not None:
+            pts_str = f'  (~{daily_set_result.points_earned:+d} pts)'
+        print(
+            f'  dailySet: {daily_set_result.cards_clicked}/'
+            f'{daily_set_result.cards_found} clicked, '
+            f'{daily_set_result.cards_skipped} skipped{pts_str}'
+        )
     for note in _all_notes(log, results):
         print(f'    • {note}')
     print('-' * 58)

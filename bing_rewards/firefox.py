@@ -109,12 +109,15 @@ def start_driver(
     profile_dir: Path,
     *,
     mobile_user_agent: str | None = None,
+    desktop_user_agent: str | None = None,
     options: opts_mod.Options,
 ):
     """Launch Firefox against the cloned profile and return a live WebDriver.
 
     When `mobile_user_agent` is given, Firefox reports as a phone browser via
     the general.useragent.override preference (applies to the whole session).
+    Anti-detection measures are applied to avoid Bing Rewards blocking the
+    automated session (webdriver flag, automationExtension, etc.).
     """
     ffox = FirefoxOptions()
     binary = options.firefox_binary or (FIREFOX_APP if FIREFOX_APP.exists() else None)
@@ -129,16 +132,34 @@ def start_driver(
     ffox.set_preference('app.update.auto', False)
     ffox.set_preference('toolkit.telemetry.reportingpolicy.firstRun', False)
     ffox.set_preference('extensions.getAddons.showPane', False)
-    if mobile_user_agent:
-        ffox.set_preference('general.useragent.override', mobile_user_agent)
+    # === Anti-detection: hide automation fingerprints ===
+    # Disable the Marionette webdriver flag that Bing uses to reject sessions.
+    ffox.set_preference('dom.webdriver.enabled', False)
+    ffox.set_preference('useAutomationExtension', False)
+    ffox.set_preference('marionette.enabled', False)
+    # Suppress the `navigator.webdriver === true` fingerprint.
+    ffox.set_preference('dom.webnotifications.enabled', False)
+    # Accept-Language header matching the UA locale.
+    ffox.set_preference('intl.accept_languages', 'en-US,en;q=0.9')
+    # === User-agent override ===
+    ua = mobile_user_agent or desktop_user_agent
+    if ua:
+        ffox.set_preference('general.useragent.override', ua)
     if options.headless:
         ffox.add_argument('--headless')
 
     service = Service(executable_path=str(options.geckodriver)) if options.geckodriver else Service()
     driver = webdriver.Firefox(service=service, options=ffox)
     driver.set_page_load_timeout(60)
+    # Set viewport size: mobile gets a phone viewport, desktop a standard one.
     if mobile_user_agent:
         driver.set_window_size(412, 915)  # Pixel-ish viewport for the mobile card
+    else:
+        driver.set_window_size(1440, 900)  # Standard desktop viewport
+    # Belt-and-suspenders: override navigator.webdriver after page load.
+    driver.execute_script(
+        'Object.defineProperty(navigator, "webdriver", {get: () => false})'
+    )
     return driver
 
 

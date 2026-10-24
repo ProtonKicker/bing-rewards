@@ -18,6 +18,10 @@ MOBILE_COUNT = 10
 MIN_DELAY = 4.0
 MAX_DELAY = 9.0
 
+# Initial delay before the first search in each round (seconds) — lets the
+# session establish and avoids the "first search never counts" edge case.
+WARMUP_DELAY = 3.0
+
 # Verify (re-read rewards status) after this many searches.
 BATCH_SIZE = 5
 
@@ -39,10 +43,19 @@ DEFAULT_SEARCH_CAP_MULTIPLIER = 3
 
 # User agent used for the mobile round (general.useragent.override on Firefox).
 # Makes the session look like an Edge-on-Android phone so mobile points count.
+# Updated: Chrome/131 (latest stable) on Android 15 Pixel 8.
 MOBILE_AGENT = (
-    'Mozilla/5.0 (Linux; Android 14; Pixel 6 Build/AP2A.240605.024) '
+    'Mozilla/5.0 (Linux; Android 15; Pixel 8 Build/AP4A.250205.002) '
     'AppleWebKit/537.36 (KHTML, like Gecko) '
-    'Chrome/121.0.0.0 Mobile Safari/537.36 Edge/121.0.2277.138'
+    'Chrome/131.0.6778.200 Mobile Safari/537.36 Edge/131.0.2903.87'
+)
+
+# Desktop round UA override — disguise geckodriver/Edge as latest Chrome on macOS.
+# Used to reduce the chance of Bing flagging the desktop automation session.
+DESKTOP_AGENT = (
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+    'AppleWebKit/537.36 (KHTML, like Gecko) '
+    'Chrome/131.0.6778.200 Safari/537.36'
 )
 
 # Known Microsoft authentication cookie names (carried over from the old fork's
