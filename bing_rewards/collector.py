@@ -258,12 +258,27 @@ def run_round(  # noqa: PLR0912, PLR0915 - the verify/retry state machine is one
                 f'points_delta={points_delta})'
             )
             # On mobile the medallion may not render on search-result pages.
-            if kind == 'mobile' and total_quiet >= 2:
-                try:
-                    session.driver.get('https://www.bing.com/')
-                    time.sleep(2.0)
-                except Exception:
-                    pass
+            if kind == 'mobile' and total_quiet >= 1:
+                _mobile_refresh_signal(session)
+            # Recovery burst: before giving up, wait longer + do a few more searches
+            # with extended delays. Bing rate-limits short bursts.
+            if (total_quiet >= opts_mod.MAX_NO_SIGNAL_BATCHES // 2 and
+                    not stall_handled and
+                    not result.complete):
+                recovered = _try_recovery_burst(kind, session, opts, queries, log,
+                                                last_points, last_counter, before)
+                if recovered:
+                    last_points = recovered['points']
+                    last_counter = recovered['counter']
+                    registered_total += recovered.get('delta', 0)
+                    rlog.registered = registered_total
+                    stall_handled = True
+                    zero_delta_batches = 0
+                    no_signal_batches = 0
+                    result.notes.append(
+                        f'recovery burst: +{recovered.get("delta", 0)} searches registered'
+                    )
+                    continue
             if total_quiet >= opts_mod.MAX_NO_SIGNAL_BATCHES:
                 result.notes.append(
                     f'stalled: {total_quiet} consecutive batches without increment '
@@ -307,6 +322,66 @@ def run_round(  # noqa: PLR0912, PLR0915 - the verify/retry state machine is one
     if shutter:
         shutter.capture(f'{kind}-after', session)
     return result
+
+
+def _mobile_refresh_signal(session) -> None:
+    """Mobile medallion won't render on Bing search pages.
+
+    Navigate to bing.com home (no query) for the medallion to load, then
+    back to a search page so subsequent searches keep counting.
+    """
+    try:
+        session.driver.get('https://www.bing.com/')
+        time.sleep(2.0 + random.uniform(0, 2.0))
+    except Exception:
+        pass
+
+
+def _try_recovery_burst(
+    kind: str,
+    session: Session,
+    opts: opts_mod.Options,
+    queries: QueryGenerator,
+    log: RunLog,
+    last_points: int | None,
+    last_counter: int | None,
+    status_before: rewards.Status,
+) -> dict | None:
+    """When points stall, wait for Bing's rate-limit window to clear then do
+    a few more searches with extra long delays.
+
+    Returns {'points': new_balance, 'counter': new_counter, 'delta': registered}
+    if any new signal appeared, else None so the outer loop keeps counting
+    toward the stall threshold.
+"""
+    burst_count = getattr(opts_mod, 'RECOVERY_BURST_COUNT', 3)
+    burst_delay = getattr(opts_mod, 'RECOVERY_BURST_DELAY', 30.0)
+    logger.info(
+        '%s: no-signal streak — cooling off %.0fs then %d recovery searches',
+        kind, burst_delay, burst_count,
+    )
+    time.sleep(burst_delay)
+    for _ in range(burst_count):
+        query = queries.next()
+        try:
+            session.search(query)
+        except RuntimeError as e:
+            logger.warning('%s: recovery search failed: %s', kind, e)
+            break
+        time.sleep(random.uniform(opts.max_delay, opts.max_delay + 6.0))
+    # Re-read status from the dashboard (fresh balance after cooldown).
+    after = session.status()
+    points_delta = _points_delta(last_points, after.points)
+    counter_delta = _progress_delta(kind, status_before, last_counter, after)
+    if (counter_delta is not None and counter_delta > 0):
+        log.event(f'{kind}: recovery burst registered {counter_delta} searches')
+        return {'points': after.points, 'counter': after.counter(kind),
+                'delta': min(counter_delta, burst_count)}
+    if points_delta is not None and points_delta > 0:
+        log.event(f'{kind}: recovery burst registered +{points_delta} points')
+        return {'points': after.points, 'counter': last_counter,
+                'delta': burst_count}
+    return None
 
 
 def _progress_delta(

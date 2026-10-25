@@ -40,7 +40,8 @@ logger = logging.getLogger(__name__)
 REWARDS_URL = 'https://rewards.bing.com/'
 
 # Timeout (seconds) for waiting for the medallion to render after a page load.
-MEDALLION_TIMEOUT = 8
+# Raised: Bing's medallion can take up to 10s on slow/mobile sessions.
+MEDALLION_TIMEOUT = 12
 
 # Older user-status endpoint (still works in some markets).
 USERSTATUS_JS = """
@@ -267,10 +268,10 @@ def _try_all_status_apis(driver) -> Status | None:
     Validates the response is real JSON with expected fields — skips
     error pages that Bing sometimes returns instead of the rewards data.
     """
-    # Make sure we're on a bing.com domain for the API call (CORS).
+    # Make sure we're on a bing.com domain for the API call (CORS safe).
     if 'bing.com' not in (driver.current_url or ''):
         driver.get(REWARDS_URL)
-        time.sleep(2.0)
+        time.sleep(3.0)
 
     api_scripts = [('userstatus', USERSTATUS_JS), ('dashboard', DASHBOARD_JS), ('dailyset', DAILYSET_JS)]
     for name, script in api_scripts:
@@ -319,11 +320,12 @@ def _read_status_from_dashboard(driver) -> Status:
     status = Status(source='dom')
     try:
         driver.get(REWARDS_URL)
-        WebDriverWait(driver, 10, poll_frequency=0.5).until(
+        WebDriverWait(driver, 15, poll_frequency=0.5).until(
             lambda d: 'dashboard' in d.current_url.lower() or
+                      'rewards' in d.current_url.lower() or
                       d.find_elements('css selector', '[class*="gamification"]')
         )
-        time.sleep(1.5)
+        time.sleep(2.5)  # Allow SPA + medallion widget to fully render
     except Exception:  # noqa: BLE001
         logger.debug('dashboard page load timed out')
         return status
@@ -348,36 +350,44 @@ def _read_status_from_dashboard(driver) -> Status:
                 break
 
     # --- Parse progress counters ---
-    # Two layouts seen in the wild:
+    # Multiple layouts seen in the wild:
     #   (a) "Desktop searches 5/30" — all on one line.
     #   (b) "Bing search" / "25/25" — number on the line AFTER the label.
-    # We capture the latter by tracking the previous non-empty line.
-    prev_line = ''
+    #   (c) "Level 2 Search" — label with number 2 rows below.
+    # We track several previous lines for ambiguous layouts.
+    prev_lines: list[str] = []
     lines = [ln.strip() for ln in page_text.splitlines() if ln.strip()]
+    _SEARCH_QUOTAS = (3, 5, 10, 15, 20, 25, 30, 40, 50, 60, 90, 100, 150)
     for idx, line in enumerate(lines):
         m_pat = re.search(r'(\d[\d,]*)\s*/\s*(\d[\d,]*)', line)
         if not m_pat:
-            prev_line = line
+            prev_lines.append(line)
+            if len(prev_lines) > 2:
+                prev_lines = prev_lines[-2:]
             continue
         cur = _int_or_none(m_pat.group(1).replace(',', ''))
         mx = _int_or_none(m_pat.group(2).replace(',', ''))
         if cur is None or mx is None:
-            prev_line = line
+            prev_lines.append(line)
+            if len(prev_lines) > 2:
+                prev_lines = prev_lines[-2:]
             continue
-        # Skip sub-quotas like "Progress towards Silver • Points to go: 375" by
-        # only accepting ratios where the denominator is a round 5, 10, 20, 25, 30 ...
-        # (Microsoft's quotas) OR the ratio is close to complete.
-        low = line.lower() + ' ' + prev_line.lower()
+        # Combine surrounding lines for context.
+        context = line.lower() + ' ' + ' '.join(prev_lines[-2:]).lower()
         prog = Progress(cur, mx)
-        if 'mobile' in low or 'phone' in low:
-            status.mobile = prog
-        elif 'search' in low or 'desktop' in low or 'pc' in low or 'bing' in low:
+        if 'mobile' in context or 'phone' in context or 'android' in context:
+            if status.mobile.maximum is None or (mx and mx > (status.mobile.maximum or 0)):
+                status.mobile = prog
+        elif 'search' in context or 'desktop' in context or 'pc' in context or 'bing' in context:
+            if status.desktop.maximum is None or (mx and mx > (status.desktop.maximum or 0)):
+                status.desktop = prog
+        elif status.desktop.current is None and mx in _SEARCH_QUOTAS:
+            # Fallback: if a line's label is missing but the denominator matches
+            # a known Bing quota, tag it as desktop search.
             status.desktop = prog
-        elif status.desktop.current is None and mx in (10, 15, 20, 25, 30, 50, 100, 150):
-            # Fallback: if a line's label is missing but the denominator is a
-            # plausible Bing quota, tag it as desktop search (the most common card).
-            status.desktop = prog
-        prev_line = line
+        prev_lines.append(line)
+        if len(prev_lines) > 2:
+            prev_lines = prev_lines[-2:]
 
     # --- Parse Daily Set activities ---
     status.activities = _parse_activities_from_dom(driver)

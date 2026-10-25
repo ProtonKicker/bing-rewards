@@ -37,9 +37,8 @@ logger = logging.getLogger(__name__)
 
 # The activity cards on /earn use Tailwind utility classes; the distinguishing
 # tokens across every layout we have seen are ``cursor-pointer`` and ``group``.
-# We deliberately target <a> (not div) because these cards have href targets
-# that trigger the reward.
-ACTIVITY_LINK_SELECTOR = 'a.cursor-pointer'
+# Also match div cards (newer Bing layouts use <div role="button"> instead of <a>).
+ACTIVITY_LINK_SELECTOR = 'a.cursor-pointer, [role="button"].cursor-pointer, .daily-set-item a, a[href*="/earn"]'
 # Completed cards are recognised by an inline checkmark SVG or the word
 # "Completed" appearing in their accessible label.
 COMPLETED_TEXT = ('completed', 'claimed', 'done')
@@ -215,12 +214,29 @@ def _find_cards(driver) -> list:
 
 
 def _is_activity_url(href: str) -> bool:
-    """Is this href likely a direct-points Daily Set / Explore activity?"""
+    """Is this href likely a direct-points Daily Set / Explore activity?
+
+    Broadened to accept quiz/poll/offer/trivia endpoints — the old
+    whitelist was too narrow and skipped ~70% of daily cards.
+    """
+    if not href or href.startswith('#') or href.startswith('javascript:'):
+        return False
+    h = href.lower()
     # Bing search quizzes and "search on Bing for X" cards.
-    if '/search?q=' in href or 'bing.com/?form=' in href:
+    if '/search?q=' in h or '?form=' in h:
         return True
     # Rewards-internal activity endpoints.
-    if 'rewards.bing.com/earn/' in href or 'bing.com/rewards/' in href:
+    if 'rewards.bing.com/' in h:
+        return True
+    # Bing quiz / poll / offer endpoints (e.g. /
+    #     activities/, /rewardsapp/, campaign redirects).
+    if '/rewards/' in h or '/activity/' in h or '/quiz/' in h:
+        return True
+    # Microsoft Start / MSN promotional offer links.
+    if 'msn.com/' in h and ('rewards' in h or 'offer' in h):
+        return True
+    #  redirector sometimes used for daily cards.
+    if 'bing.com/ck/a' in h:
         return True
     return False
 

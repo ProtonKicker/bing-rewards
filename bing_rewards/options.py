@@ -11,30 +11,39 @@ from pathlib import Path
 import bing_rewards
 
 # Fallback search counts per round, used only when live quota can't be read.
-DESKTOP_COUNT = 30
-MOBILE_COUNT = 10
+# 2026 quotas: US/Desktop typically 3×level up to ~90/day; Mobile up to 30/day.
+DESKTOP_COUNT = 90
+MOBILE_COUNT = 30
 
 # Randomized delay range between searches (seconds).
-MIN_DELAY = 4.0
-MAX_DELAY = 9.0
+# Longer delays reduce Bing rate-limit flags → more searches actually count.
+MIN_DELAY = 8.0
+MAX_DELAY = 18.0
 
 # Initial delay before the first search in each round (seconds) — lets the
 # session establish and avoids the "first search never counts" edge case.
-WARMUP_DELAY = 3.0
+WARMUP_DELAY = 5.0
 
 # Verify (re-read rewards status) after this many searches.
-BATCH_SIZE = 5
+# Smaller batches = faster stall detection, less wasted time.
+BATCH_SIZE = 3
 
 # Searches to re-attempt with fresh queries/longer delays when a batch
 # registers nothing, before declaring the round stalled.
-RETRY_ROUNDS = 1
+RETRY_ROUNDS = 2
+
+# When detection is suspected (points stuck), pause this long before
+# doing a burst of "recovery" searches with extra delays.
+RECOVERY_BURST_DELAY = 30.0
+RECOVERY_BURST_COUNT = 3
 
 BING_SEARCH_URL = 'https://www.bing.com/search?form=QBRE&q='
 
 # Consecutive unverifiable batches before the collector treats the round as
 # stalled and stops (prevents an infinite loop when the rewards page never
-# returns a readable signal).
-MAX_NO_SIGNAL_BATCHES = 5
+# returns a readable signal).  Raised from 5→8 since Bing medallion often
+# lags ~30-60s behind actual balance — more patience = more searches counted.
+MAX_NO_SIGNAL_BATCHES = 8
 
 # Hard-cap multiplier: when --max-searches is unset the collector still needs
 # an absolute ceiling so a fully silent Bing page cannot loop forever. The per
@@ -43,19 +52,20 @@ DEFAULT_SEARCH_CAP_MULTIPLIER = 3
 
 # User agent used for the mobile round (general.useragent.override on Firefox).
 # Makes the session look like an Edge-on-Android phone so mobile points count.
-# Updated: Chrome/131 (latest stable) on Android 15 Pixel 8.
+# Updated: Chrome/144 on Android 16 Pixel 9 — current as of Oct 2026.
 MOBILE_AGENT = (
-    'Mozilla/5.0 (Linux; Android 15; Pixel 8 Build/AP4A.250205.002) '
+    'Mozilla/5.0 (Linux; Android 16; Pixel 9 Build/BP3A.260222.001) '
     'AppleWebKit/537.36 (KHTML, like Gecko) '
-    'Chrome/131.0.6778.200 Mobile Safari/537.36 Edge/131.0.2903.87'
+    'Chrome/144.0.7528.41 Mobile Safari/537.36 EdgA/144.0.7528.41'
 )
 
 # Desktop round UA override — disguise geckodriver/Edge as latest Chrome on macOS.
 # Used to reduce the chance of Bing flagging the desktop automation session.
+# Updated: Chrome/144 on macOS Sequoia — current as of Oct 2026.
 DESKTOP_AGENT = (
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
     'AppleWebKit/537.36 (KHTML, like Gecko) '
-    'Chrome/131.0.6778.200 Safari/537.36'
+    'Chrome/144.0.7528.41 Safari/537.36'
 )
 
 # Known Microsoft authentication cookie names (carried over from the old fork's
