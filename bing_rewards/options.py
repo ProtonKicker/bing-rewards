@@ -16,39 +16,48 @@ DESKTOP_COUNT = 90
 MOBILE_COUNT = 30
 
 # Randomized delay range between searches (seconds).
-# Longer delays reduce Bing rate-limit flags → more searches actually count.
-MIN_DELAY = 8.0
-MAX_DELAY = 18.0
+# Longer, more random delays = Bing detects human rhythm = more searches credit.
+MIN_DELAY = 12.0
+MAX_DELAY = 35.0
 
 # Initial delay before the first search in each round (seconds) — lets the
-# session establish and avoids the "first search never counts" edge case.
-WARMUP_DELAY = 5.0
+# session establish and avoids the "first search always
+# wasted" observation from short runs.
+WARMUP_DELAY = 10.0
 
 # Verify (re-read rewards status) after this many searches.
-# Smaller batches = faster stall detection, less wasted time.
-BATCH_SIZE = 3
+# Larger batches = fewer navigations (each nav may trigger bot detection)
+# but slower stall detection. 5 is the sweet spot for max registration.
+BATCH_SIZE = 5
 
 # Searches to re-attempt with fresh queries/longer delays when a batch
 # registers nothing, before declaring the round stalled.
-RETRY_ROUNDS = 2
+RETRY_ROUNDS = 3
 
 # When detection is suspected (points stuck), pause this long before
 # doing a burst of "recovery" searches with extra delays.
 RECOVERY_BURST_DELAY = 30.0
-RECOVERY_BURST_COUNT = 3
+RECOVERY_BURST_COUNT = 2
 
 BING_SEARCH_URL = 'https://www.bing.com/search?form=QBRE&q='
 
-# Consecutive unverifiable batches before the collector treats the round as
-# stalled and stops (prevents an infinite loop when the rewards page never
-# returns a readable signal).  Raised from 5→8 since Bing medallion often
-# lags ~30-60s behind actual balance — more patience = more searches counted.
+# Exhaustive re-check wait: how long to wait before force-refreshing medallion
+# and doing a thorough double-check when the balance seems stale.
+RECHECK_WAIT = 30.0
+
+# Consecutive unverifiable batches before the collector declares a stall.
+# The medallion often lags 30-90s behind actual balance. Higher patience
+# = more searches ultimately recognized by Bing.
 MAX_NO_SIGNAL_BATCHES = 8
 
 # Hard-cap multiplier: when --max-searches is unset the collector still needs
 # an absolute ceiling so a fully silent Bing page cannot loop forever. The per
 # round effective cap is target * DEFAULT_SEARCH_CAP_MULTIPLIER.
-DEFAULT_SEARCH_CAP_MULTIPLIER = 3
+DEFAULT_SEARCH_CAP_MULTIPLIER = 5
+
+# Wall-clock timeout per round (seconds). Prevents 52-minute hangs when Bing
+# is completely unresponsive.
+WALL_CLOCK_TIMEOUT = 300.0
 
 # User agent used for the mobile round (general.useragent.override on Firefox).
 # Makes the session look like an Edge-on-Android phone so mobile points count.
