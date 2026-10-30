@@ -16,6 +16,7 @@ from bing_rewards.firefox import (
     clone_profile,
     find_profile_directory,
     firefox_is_running,
+    quit_firefox,
     quit_driver,
     start_driver,
 )
@@ -67,10 +68,8 @@ def _run_real(opts: opts_mod.Options, log: RunLog, shutter: Shutter) -> list[Rou
     results: list[RoundResult] = []
     profile_src = find_profile_directory(opts.profile_name)
     if firefox_is_running():
-        logger.warning(
-            'Firefox is currently running — the profile clone may lag behind its '
-            'newest cookies. Quit Firefox if the signed-in check fails.'
-        )
+        logger.warning('Firefox is running — quitting so the profile clone gets fresh cookies')
+        quit_firefox()
     logger.info('cloning profile %s to a temp directory', profile_src)
     cloned = clone_profile(profile_src)
     try:
@@ -109,6 +108,9 @@ def _run_daily_set_session(
     None if the session cannot even sign in.
     """
     profile_src = find_profile_directory(opts.profile_name)
+    if firefox_is_running():
+        logger.warning('Firefox is running — quitting so the Daily Set clone gets fresh cookies')
+        quit_firefox()
     cloned = clone_profile(profile_src)
     driver = None
     try:

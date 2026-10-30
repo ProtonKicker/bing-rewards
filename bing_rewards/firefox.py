@@ -19,6 +19,7 @@ import logging
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 from selenium import webdriver
@@ -80,6 +81,24 @@ def find_profile_directory(profile_name: str) -> Path:
         f'profile {profile_name!r} not found. Available: '
         f'{", ".join(sorted(k for k in dirs if k != "__default__"))}'
     )
+
+
+def quit_firefox() -> None:
+    """Quit Firefox completely so cookies flush to disk before profile clone."""
+    try:
+        subprocess.run(
+            ['osascript', '-e', 'tell application "Firefox" to quit'],
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+        # Wait for the process to actually exit
+        for _ in range(20):
+            if not firefox_is_running():
+                break
+            time.sleep(0.5)
+    except Exception as e:  # noqa: BLE001
+        logger.warning('error quitting Firefox: %s', e)
 
 
 def firefox_is_running() -> bool:
@@ -167,7 +186,8 @@ def check_signed_in(driver) -> tuple[bool, str]:
     """Closed-loop gate: verify the session is really logged into Bing.
 
     Returns (signed_in, reason). Loads bing.com and checks for the account
-    avatar, then falls back to inspecting Microsoft auth cookies.
+    avatar or rewards medallion. Cookie presence alone is NOT enough —
+    expired auth cookies still exist in the profile but the web session is dead.
     """
     driver.get(BING_HOME)
     # Signed-in: the account anchor points at the profile, not the login page.
@@ -180,12 +200,16 @@ def check_signed_in(driver) -> tuple[bool, str]:
     except Exception as e:  # noqa: BLE001 - selenium raises many element-not-found types
         logger.debug('avatar lookup failed: %s', e)
 
-    cookie_names = {c.get('name') for c in driver.get_cookies()}
-    found = cookie_names & set(opts_mod.MS_AUTH_COOKIES)
-    if found:
-        return True, f'microsoft auth cookies present: {", ".join(sorted(found))}'
+    # Fallback: rewards medallion is a stronger signal — it only renders for
+    # authenticated users and carries the live points balance.
+    try:
+        medallion = driver.find_elements('css selector', '#rh_rwm[data-rewards-widget]')
+        if medallion:
+            return True, 'rewards medallion present'
+    except Exception as e:
+        logger.debug('medallion lookup failed: %s', e)
 
-    detail = 'no account avatar and no Microsoft auth cookies'
+    detail = 'not signed in: no account avatar and no rewards medallion'
     if firefox_is_running():
         detail += (
             ' (note: Firefox was running during profile copy — its newest cookies'
