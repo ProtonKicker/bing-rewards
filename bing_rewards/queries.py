@@ -1,7 +1,13 @@
 # SPDX-FileCopyrightText: 2026 jack-mil
 # SPDX-License-Identifier: MIT
 
-"""Human-ish search queries built from the bundled keyword corpus."""
+"""Human-ish search queries built from the bundled keyword corpus.
+
+Strategy: produce queries that look like what a real person would type --
+simple keyword lookups ("weather today"), natural questions ("what causes
+aurora borealis"), occasional local/news/comparison searches.  Uniform
+queries get flagged; we intersperse patterns.
+"""
 
 from __future__ import annotations
 
@@ -22,10 +28,28 @@ def load_keywords() -> list[str]:
 
 
 class QueryGenerator:
-    """Yields varied queries; reshuffles when exhausted so retries differ."""
+    """Yields varied, human-like queries; reshuffles when exhausted."""
 
-    PREFIXES = ('', '', '', 'what is ', 'best ', 'how does ', 'why ')
-    SUFFIXES = ('', '', '', 'today', 'near me', 'explained')
+    # Query patterns weighted toward simple lookups (most natural), with
+    # occasional questions, comparisons, and local/news queries.
+    PATS = (
+        '{word}',                               # simple keyword (most common)
+        '{word}',                               # weighted toward simple
+        '{word}',
+        '{word}',
+        '{word}',
+        '{word}',                               # 6 out of 16 = simple lookup
+        'what is {word}',                       # knowledge lookup
+        'how is {word}',                        # knowledge lookup
+        '{word} near me',                       # local search
+        '{word} today',                         # trending/news
+        '{word} news',                          # news
+        '{word} 2026',                          # year-specific
+        'best {word}',                          # comparison
+        'why is {word}',                        # question
+        '{word} vs',                            # comparison starter
+        '{word} explained',                     # explanation
+    )
 
     def __init__(self) -> None:
         self._words: list[str] = []
@@ -36,12 +60,14 @@ class QueryGenerator:
             self._words = load_keywords()
             self._used.clear()
         base = self._words.pop()
-        query = f'{random.choice(self.PREFIXES)}{base} {random.choice(self.SUFFIXES)}'.strip()
+        pat = random.choice(self.PATS)
+        query = pat.format(word=base)
         # Avoid repeats within a run when possible.
         tries = 0
         while query in self._used and tries < MAX_REPEAT_TRIES and self._words:
             base = self._words.pop()
-            query = f'{random.choice(self.PREFIXES)}{base} {random.choice(self.SUFFIXES)}'.strip()
+            pat = random.choice(self.PATS)
+            query = pat.format(word=base)
             tries += 1
         self._used.add(query)
         return query

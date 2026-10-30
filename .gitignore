@@ -63,3 +63,7 @@ venv.bak/
 
 # local daily run logs (personal points data)
 runs/
+
+# Generated screenshots (not committed)
+docs/screenshots/*
+

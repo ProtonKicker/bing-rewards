@@ -50,7 +50,7 @@ class MockSession:
     def rewards_healthy(self) -> bool:
         return True  # mock account is always healthy
 
-    def status(self) -> rewards.Status:
+    def status(self, force_refresh: bool = False) -> rewards.Status:
         status = rewards.Status(source='api', points=self._state['points'])
         status.desktop = rewards.Progress(self._state['desktop'], DESKTOP_MAX)
         status.mobile = rewards.Progress(self._state['mobile'], MOBILE_MAX)

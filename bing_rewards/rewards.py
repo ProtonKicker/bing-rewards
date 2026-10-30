@@ -167,13 +167,19 @@ def wait_for_medallion(driver, timeout: float = MEDALLION_TIMEOUT):
         return None
 
 
-def read_medallion(driver) -> Status | None:
+def read_medallion(driver, force_refresh: bool = False) -> Status | None:
     """Read the rewards medallion embedded in the current bing.com page.
 
     First waits up to MEDALLION_TIMEOUT for the widget to appear on the page,
     so callers right after a search navigation still get a result.
+    When *force_refresh* is True, the medallion widget is explicitly reloaded
+    via JavaScript to defeat Bing's client-side balance caching — without this
+    the displayed balance lags 30-90s behind reality and the collector wrongly
+    believes searches didn't register.
     Returns None when the widget isn't on the page (caller tries other sources).
     """
+    if force_refresh:
+        _refresh_medallion_widget(driver)
     try:
         els = driver.find_elements('css selector', MEDALLION_SEL)
         if not els:
@@ -208,7 +214,30 @@ def read_medallion(driver) -> Status | None:
     return status
 
 
-def read_status(driver) -> Status:
+def _refresh_medallion_widget(driver) -> None:
+    """Force-reload the Bing rewards medallion widget via JavaScript.
+
+    Bing's medallion caches its ``data-content`` payload on the page; without
+    forcing a refresh, the balance value can lag 30-90 seconds behind the
+    real account balance.  This fires the widget's internal reload endpoint.
+    """
+    try:
+        # Method 1: fire Bing's global rewards widget refresh if available
+        driver.execute_script(
+            'if (window.rewardsWidget && window.rewardsWidget.refresh) '
+            '{ window.rewardsWidget.refresh(); return true; } return false;'
+        )
+        # Method 2: kill the cached data-content so the widget must re-fetch
+        driver.execute_script(
+            "var el = document.querySelector('#rh_rwm[data-rewards-widget]');"
+            "if (el) { el.removeAttribute('data-content'); el.dataset.loaded = 'false'; }"
+        )
+        time.sleep(1.5)
+    except Exception:
+        pass
+
+
+def read_status(driver, force_refresh: bool = False) -> Status:
     """Read the live rewards status through the browser session.
 
     Primary source: the rewards.bing.com dashboard DOM — it renders the true
@@ -216,17 +245,57 @@ def read_status(driver) -> Status:
     that does not advance between searches, making it unreliable for
     per-batch verification).
 
+    When *force_refresh* is True, medallion widget caching is defeated so
+    the balance read is as fresh as possible. Use this before declaring a
+    batch "no signal" — many "failed" searches actually registered, the
+    medallion just hadn't refreshed yet.
+
     Flow:
-    1. Dashboard DOM scrape — authoritative balance + Daily Set activities.
-    2. Rewards APIs (userstatus, dashboard, dailyset) — carry per-card search
-       progress; merged into the dashboard result if they add data.
-    3. bing.com medallion — used only for per-card progress the dashboard omits.
-    4. Raw body scrape as a last resort.
+    1. Rewards APIs (userstatus, dashboard, dailyset) for per-card progress.
+    2. bing.com medallion (force-refreshed if requested) — best for balance.
+    3. Dashboard DOM scrape as cross-check.
+    4. JavaScript balance API as final fallback.
     """
+    # If we're on a search page, the medallion may be stale — force a refresh
+    # when explicitly requested to get the freshest balance.
+    if force_refresh and 'bing.com' in (driver.current_url or ''):
+        medallion_fresh = read_medallion(driver, force_refresh=True)
+        if medallion_fresh is not None and medallion_fresh.points is not None:
+            logger.debug('read_status: fresh medallion balance=%s', medallion_fresh.points)
+            # Still try to get per-card quota from APIs
+            api_status = _try_all_status_apis(driver)
+            if api_status is not None:
+                if (
+                    medallion_fresh.desktop.maximum is None
+                    and api_status.desktop.maximum is not None
+                ):
+                    medallion_fresh.desktop = api_status.desktop
+                if (
+                    medallion_fresh.mobile.maximum is None
+                    and api_status.mobile.maximum is not None
+                ):
+                    medallion_fresh.mobile = api_status.mobile
+                medallion_fresh.source = f'{medallion_fresh.source}+api'
+            return medallion_fresh
+
     # Try the rewards APIs first for per-card progress (cheap — no navigation).
     api_status = _try_all_status_apis(driver)
 
-    # Always read the dashboard DOM for the authoritative balance.
+    # Read medallion on bing.com (cheaper than dashboard DOM navigation).
+    medallion: Status | None = None
+    on_bing = 'bing.com' in (driver.current_url or '')
+    if on_bing:
+        medallion = read_medallion(driver)
+        if medallion is not None and medallion.points is not None:
+            if api_status is not None:
+                if medallion.desktop.maximum is None and api_status.desktop.maximum is not None:
+                    medallion.desktop = api_status.desktop
+                if medallion.mobile.maximum is None and api_status.mobile.maximum is not None:
+                    medallion.mobile = api_status.mobile
+                medallion.source = f'{medallion.source}+api'
+            return medallion
+
+    # Dashboard DOM scrape — more expensive (navigation required) but authoritative.
     dash = _read_status_from_dashboard(driver)
 
     # Merge API per-card progress into the dashboard result (keep the
@@ -246,12 +315,11 @@ def read_status(driver) -> Status:
         return dash
 
     # If dashboard DOM missed the balance (unusual), fall back to the medallion
-    # embedded in the bing.com page.
-    on_bing = 'bing.com' in (driver.current_url or '')
+    # embedded in the bing.com page (also try force refresh at this point).
     if not on_bing:
         driver.get('https://www.bing.com/')
         time.sleep(1.5)
-    medallion = read_medallion(driver)
+    medallion = read_medallion(driver, force_refresh=True)
     if medallion is not None and medallion.points is not None:
         if dash.activities:
             medallion.activities = dash.activities
@@ -259,7 +327,40 @@ def read_status(driver) -> Status:
 
     if medallion is not None:
         return medallion
+
+    # Last resort: try JavaScript balance API from bing.com page
+    js_balance = _read_balance_via_js(driver)
+    if js_balance is not None:
+        status = Status(source='js_api', points=js_balance)
+        return status
+
     return dash
+
+
+def _read_balance_via_js(driver) -> int | None:
+    """Last-ditch balance read via rewards API call from JS context.
+
+    Sometimes both the medallion and dashboard fail — try calling the
+    rewards API directly from the browser's authenticated session.
+    """
+    try:
+        text = driver.execute_script(
+            "return fetch('https://rewards.bing.com/api/dashboard', "
+            "{credentials: 'include'}).then(r => r.text())"
+        )
+        if text and isinstance(text, str) and not text.strip().startswith('<'):
+            data = json.loads(text.strip())
+            if isinstance(data, dict):
+                # Dashboard API returns points under 'availablePoints' or 'userStatus'
+                pts = data.get('availablePoints')
+                if pts is not None:
+                    return _int_or_none(pts)
+                us = data.get('userStatus', {})
+                if isinstance(us, dict):
+                    return _int_or_none(us.get('availablePoints'))
+    except Exception:
+        pass
+    return None
 
 
 def _try_all_status_apis(driver) -> Status | None:

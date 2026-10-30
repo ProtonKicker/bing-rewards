@@ -37,14 +37,32 @@ logger = logging.getLogger(__name__)
 
 # The activity cards on /earn use Tailwind utility classes; the distinguishing
 # tokens across every layout we have seen are ``cursor-pointer`` and ``group``.
-# Also match div cards (newer Bing layouts use <div role="button"> instead of <a>).
-ACTIVITY_LINK_SELECTOR = 'a.cursor-pointer, [role="button"].cursor-pointer, .daily-set-item a, a[href*="/earn"]'
+# They live on the ``/earn`` page, show a short title plus a "+N" badge, and
+# clicking the card registers the activity server-side (you do NOT need to
+# interact with whatever page the href lands on — the redirecting page fires the
+# reward automatically).
+#
+# TIGHTENED: only match links within the dashboard body area (not the top nav
+# bar). Navigation links ("Dashboard", "Earn", "Redeem") share the same
+# CSS tokens — we must filter them out rigorously.
+ACTIVITY_LINK_SELECTOR = (
+    'a.cursor-pointer.group[href*="bing.com"]'  # Bing redirect activity links
+    ', a[href*="/ck/a"]'   # Bing check/award redirect (most daily cards)
+    ', .daily-set a[href]'  # daily-set section links
+    ', .gamification a[href]'  # gamification activity links
+    ', a[href*="rewards.bing.com"]'  # direct rewards links (excluding nav)
+)
 # Completed cards are recognised by an inline checkmark SVG or the word
 # "Completed" appearing in their accessible label.
 COMPLETED_TEXT = ('completed', 'claimed', 'done')
 # Badge inside the card that advertises the points on offer; we use it only
 # for human-readable logging.
 POINTS_BADGE_RE = (r'\+\s*(\d+)\s*(pts|points)?')
+# Navigation link text that we must NEVER click as an activity
+NAV_LINK_TEXT = frozenset({
+    'dashboard', 'earn', 'redeem', 'about', 'refer and earn',
+    'rewards', 'home', 'profile', 'settings', 'help',
+})
 
 
 class DailySetResult:
@@ -182,10 +200,9 @@ def run_daily_set(driver) -> DailySetResult:
 def _find_cards(driver) -> list:
     """Return clickable, uncompleted activity card links.
 
-    Uses a WHITELIST strategy: only links whose href points to a Bing search
-    endpoint or a Rewards activity URL are kept. Text/label extraction is
-    timing-sensitive in the SPA flow, so we deliberately DO NOT filter on
-    label presence — a card with an empty label can still earn points.
+    Uses strict filtering to exclude navigation links (Dashboard, Earn, Redeem)
+    which share the same CSS tokens as activity cards. Only links whose href
+    matches known activity URL patterns are kept.
     """
     candidates: list = []
     seen_hrefs: set[str] = set()
@@ -199,9 +216,13 @@ def _find_cards(driver) -> list:
                 continue
             if not _is_activity_url(href):
                 continue
+            # Skip navigation links by text label
+            label = _card_label(link).strip().lower()
+            if label in NAV_LINK_TEXT:
+                logger.debug('skipping nav link: %s -> %s', label, href)
+                continue
             seen_hrefs.add(href)
-            # Skip cards that have already been claimed (label ending in
-            # "Completed" or the link pointing back to earn without a quest).
+            # Skip cards that have already been claimed
             if _is_card_completed(link):
                 continue
             candidates.append(link)
@@ -216,27 +237,36 @@ def _find_cards(driver) -> list:
 def _is_activity_url(href: str) -> bool:
     """Is this href likely a direct-points Daily Set / Explore activity?
 
-    Broadened to accept quiz/poll/offer/trivia endpoints — the old
-    whitelist was too narrow and skipped ~70% of daily cards.
+    Must be strict enough to exclude navigation links ("Dashboard", "Earn",
+    "Redeem", "About", "Refer and Earn") which also live on rewards.bing.com.
     """
     if not href or href.startswith('#') or href.startswith('javascript:'):
         return False
     h = href.lower()
-    # Bing search quizzes and "search on Bing for X" cards.
+
+    # === BING REDIRECTOR (most daily cards use this) ===
+    if '/ck/a' in h:
+        return True
     if '/search?q=' in h or '?form=' in h:
         return True
-    # Rewards-internal activity endpoints.
+
+    # === REWARDS-SPECIFIC ACTIVITY ENDPOINTS ===
+    # Exclude plain navigation pages while allowing API/activity URLs
     if 'rewards.bing.com/' in h:
+        path = re.sub(r'^https?://[^/]+', '', h).split('?')[0].rstrip('/')
+        if path in ('', '/', '/dashboard', '/earn', '/redeem',
+                     '/about', '/refer-earn', '/api'):
+            return False
+        if path.startswith('/api/') and '/activity' in path:
+            return True
+        if '?' in h:
+            return True
+        return False
+
+    # === QUIZ / OFFER / REWARDS ENDPOINTS ===
+    if '/rewards/' in h or '/activity/' in h or '/quiz/' in h or '/earn/' in h:
         return True
-    # Bing quiz / poll / offer endpoints (e.g. /
-    #     activities/, /rewardsapp/, campaign redirects).
-    if '/rewards/' in h or '/activity/' in h or '/quiz/' in h:
-        return True
-    # Microsoft Start / MSN promotional offer links.
     if 'msn.com/' in h and ('rewards' in h or 'offer' in h):
-        return True
-    #  redirector sometimes used for daily cards.
-    if 'bing.com/ck/a' in h:
         return True
     return False
 
