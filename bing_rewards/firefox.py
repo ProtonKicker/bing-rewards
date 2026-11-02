@@ -117,7 +117,15 @@ def clone_profile(source: Path) -> Path:
     while automation never touches (or can corrupt) the profile in daily use.
     """
     dest = Path(tempfile.mkdtemp(prefix='bing-rewards-profile-'))
-    shutil.copytree(source, dest / source.name)
+
+    def _ignore(path, names):
+        # Exclude the heavy storage/ tree and extensions/ to keep the clone
+        # small and avoid extension popups / DOM mutations during automation.
+        if Path(path) == source:
+            return {'storage', 'extensions'}
+        return set()
+
+    shutil.copytree(source, dest / source.name, ignore=_ignore)
     cloned = dest / source.name
     # Remove a copied lock file; it belongs to the source browser process.
     (cloned / 'lock').unlink(missing_ok=True)
