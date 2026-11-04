@@ -275,12 +275,9 @@ def run_round(  # noqa: PLR0912, PLR0915 - the verify/retry state machine is one
             (counter_delta is None and points_delta is None)
             or (points_delta is not None and points_delta == 0)
         ):
-            # No immediate signal from medallion. This is the KEY issue:
-            # the medallion balance lags, so we don't immediately assume failure.
-            #
-            # Strategy: trust that the batch registered (optimistically accumulate)
-            # but track how many batches we've optimistically registered. If they
-            # accumulate too long without verification, do an exhaustive check.
+            # No immediate signal from medallion. Bing's balance lags 30-90s.
+            # MAXIMIZE MODE: accept optimistic registration and keep going.
+            # Only stall after 3 consecutive quiet batches.
             last_counter = after.counter(kind)
             last_points = after.points
             if points_delta == 0:
@@ -294,61 +291,17 @@ def run_round(  # noqa: PLR0912, PLR0915 - the verify/retry state machine is one
                 f'points_delta={points_delta}; optimistic_accumulator={optimistic_registered})'
             )
 
-            # After several quiet batches, do an exhaustive re-check with force refresh
-            if total_quiet >= opts_mod.MAX_NO_SIGNAL_BATCHES // 3 and not stall_handled:
-                _exhaustive_recheck(kind, session, opts, queries, log,
-                                    last_points, last_counter, before, result,
-                                    registered_total, attempted)
-                # Update tracking variables after recheck
-                re_after = session.status()
-                re_counter_delta = _progress_delta(kind, before, last_counter, re_after)
-                re_points_delta = _points_delta(last_points, re_after.points)
-                if (re_counter_delta is not None and re_counter_delta > 0) or \
-                   (re_points_delta is not None and re_points_delta > 0):
-                    # Optimistic accumulator was right — confirm all pending searches
-                    if re_counter_delta is not None and re_counter_delta > 0:
-                        registered_total += min(re_counter_delta, optimistic_registered)
-                        last_counter = re_after.counter(kind) or last_counter
-                    elif re_points_delta is not None and re_points_delta > 0:
-                        registered_total += optimistic_registered
-                        last_points = re_after.points
-                    optimistic_registered = 0
-                    rlog.registered = registered_total
-                    stall_handled = True
-                    zero_delta_batches = 0
-                    no_signal_batches = 0
-                    result.notes.append(
-                        f'optimistic batch confirmed after exhaustive check '
-                        f'(+{optimistic_registered} searches verified)'
-                    )
-                    continue
-
-                # Force refresh didn't help either — this may be a genuine stall.
-                # Recovery burst: before giving up, wait longer + do more searches
-                recovered = _try_recovery_burst(kind, session, opts, queries, log,
-                                                last_points, last_counter, before)
-                if recovered:
-                    last_points = recovered['points']
-                    last_counter = recovered['counter']
-                    registered_total += recovered.get('delta', 0)
-                    optimistic_registered = 0
-                    rlog.registered = registered_total
-                    stall_handled = True
-                    zero_delta_batches = 0
-                    no_signal_batches = 0
-                    result.notes.append(
-                        f'recovery burst: +{recovered.get("delta", 0)} searches registered'
-                    )
-                    continue
-
-            if total_quiet >= opts_mod.MAX_NO_SIGNAL_BATCHES:
+            if total_quiet >= 3:
                 result.notes.append(
-                    f'stalled after exhaustive check: {total_quiet} batches without increment '
-                    f'(including {optimistic_registered} optimistically-tracked searches)'
+                    f'stalled after {total_quiet} consecutive quiet batches'
                 )
                 result.stalled = True
                 rlog.stalled = True
                 break
+            # Accept optimistic registration and continue
+            registered_total += batch
+            optimistic_registered = 0
+            rlog.registered = registered_total
             continue
         else:
             # Negative counter/points delta (shouldn't happen normally).

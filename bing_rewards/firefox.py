@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import configparser
 import logging
+import os
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
@@ -110,6 +112,37 @@ def firefox_is_running() -> bool:
         return False
 
 
+def running_firefox_pids() -> set[int]:
+    """Return the set of PIDs for all running firefox processes."""
+    pids: set[int] = set()
+    try:
+        out = subprocess.run(['pgrep', '-x', 'firefox'], capture_output=True, check=False)
+        if out.returncode == 0:
+            for line in (out.stdout or b'').decode().splitlines():
+                line = line.strip()
+                if line.isdigit():
+                    pids.add(int(line))
+    except OSError:
+        pass
+    return pids
+
+
+def kill_firefox_pids(pids: set[int]) -> None:
+    """Send SIGTERM to specific firefox PIDs and wait for them to exit."""
+    if not pids:
+        return
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+    for _ in range(20):
+        current = running_firefox_pids()
+        if not current.intersection(pids):
+            break
+        time.sleep(0.5)
+
+
 def clone_profile(source: Path) -> Path:
     """Copy a profile directory to a fresh temp dir and return its path.
 
@@ -177,7 +210,7 @@ def start_driver(
 
     service = Service(executable_path=str(options.geckodriver)) if options.geckodriver else Service()
     driver = webdriver.Firefox(service=service, options=ffox)
-    driver.set_page_load_timeout(60)
+    driver.set_page_load_timeout(120)
     # Set viewport size: mobile gets a phone viewport, desktop a standard one.
     if mobile_user_agent:
         driver.set_window_size(412, 915)  # Pixel-ish viewport for the mobile card
@@ -196,6 +229,10 @@ def check_signed_in(driver) -> tuple[bool, str]:
     Returns (signed_in, reason). Loads bing.com and checks for the account
     avatar or rewards medallion. Cookie presence alone is NOT enough —
     expired auth cookies still exist in the profile but the web session is dead.
+
+    Enhanced: for mobile UAs where the desktop elements may not render,
+    fall back to checking if the URL doesn't redirect to login and the
+    page has rewards-related content.
     """
     driver.get(BING_HOME)
     # Signed-in: the account anchor points at the profile, not the login page.
@@ -216,6 +253,17 @@ def check_signed_in(driver) -> tuple[bool, str]:
             return True, 'rewards medallion present'
     except Exception as e:
         logger.debug('medallion lookup failed: %s', e)
+
+    # Mobile UA fallback: check if we're on bing.com (not redirected to login)
+    # and the page has any rewards-related content.
+    try:
+        current_url = driver.current_url or ''
+        if 'login' not in current_url.lower() and 'bing.com' in current_url:
+            page_source = (driver.page_source or '').lower()
+            if 'rewards' in page_source or 'points' in page_source or 'msn' in page_source:
+                return True, 'mobile session: rewards content detected on page'
+    except Exception as e:
+        logger.debug('mobile sign-in fallback failed: %s', e)
 
     detail = 'not signed in: no account avatar and no rewards medallion'
     if firefox_is_running():

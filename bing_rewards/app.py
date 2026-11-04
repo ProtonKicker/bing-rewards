@@ -7,17 +7,22 @@ from __future__ import annotations
 
 import logging
 import shutil
+import time
 from typing import TYPE_CHECKING
 
 from bing_rewards import options as opts_mod
 from bing_rewards.collector import RealSession, RoundResult, run_round
+from bing_rewards.bing_news import BingNewsResult, run_bing_news
 from bing_rewards.daily_set import DailySetResult, run_daily_set
+from bing_rewards.outlook import OutlookResult, run_outlook_emails
 from bing_rewards.firefox import (
     clone_profile,
     find_profile_directory,
     firefox_is_running,
-    quit_firefox,
+    kill_firefox_pids,
     quit_driver,
+    quit_firefox,
+    running_firefox_pids,
     start_driver,
 )
 from bing_rewards.mock import MockSession
@@ -45,7 +50,13 @@ def main(argv: list[str] | None = None) -> int:
     shutter = Shutter(None if opts.dry_run else opts.screenshots_dir)
 
     daily_set_result = None
-    results = _run_dry(opts, log) if opts.dry_run else _run_real(opts, log, shutter)
+    bing_news_result = None
+    outlook_result = None
+    pre_existing_pids: set[int] = set()
+    if opts.dry_run:
+        results = _run_dry(opts, log)
+    else:
+        results, pre_existing_pids = _run_real(opts, log, shutter)
 
     # In real mode, run Daily Set completion after search rounds
     # (uses the last active driver session if possible).
@@ -55,21 +66,32 @@ def main(argv: list[str] | None = None) -> int:
         last_round = results[-1]
         if last_round.signed_in:
             daily_set_result = _run_daily_set_session(opts, log, shutter)
+            bing_news_result = _run_bing_news_session(opts, log, shutter)
+            outlook_result = _run_outlook_session(opts, log, shutter)
+
+    # Final cleanup: if the script launched Firefox (no user Firefox at start),
+    # make sure it is quit now.
+    if not pre_existing_pids and firefox_is_running():
+        logger.info('Final cleanup: quitting Firefox launched by script')
+        try:
+            quit_firefox()
+        except Exception as e:
+            logger.debug('final quit_firefox failed: %s', e)
 
     log.save()
-    return _report(log, results, daily_set_result)
+    return _report(log, results, daily_set_result, bing_news_result, outlook_result)
 
 
 def _rounds(opts: opts_mod.Options) -> list[str]:
     return [k for k, enabled in (('desktop', opts.desktop), ('mobile', opts.mobile)) if enabled]
 
 
-def _run_real(opts: opts_mod.Options, log: RunLog, shutter: Shutter) -> list[RoundResult]:
+def _run_real(opts: opts_mod.Options, log: RunLog, shutter: Shutter) -> tuple[list[RoundResult], set[int]]:
     results: list[RoundResult] = []
     profile_src = find_profile_directory(opts.profile_name)
-    if firefox_is_running():
-        logger.warning('Firefox is running — quitting so the profile clone gets fresh cookies')
-        quit_firefox()
+    pre_existing_pids = running_firefox_pids()
+    if pre_existing_pids:
+        logger.warning('Firefox is already running — profile clone may have stale cookies')
     logger.info('cloning profile %s to a temp directory', profile_src)
     cloned = clone_profile(profile_src)
     try:
@@ -77,6 +99,7 @@ def _run_real(opts: opts_mod.Options, log: RunLog, shutter: Shutter) -> list[Rou
             mobile_ua = opts_mod.MOBILE_AGENT if kind == 'mobile' else None
             desktop_ua = opts_mod.DESKTOP_AGENT if kind == 'desktop' else None
             logger.info('starting Firefox for the %s round', kind)
+            round_start_pids = running_firefox_pids()
             driver = start_driver(
                 cloned,
                 mobile_user_agent=mobile_ua,
@@ -94,10 +117,95 @@ def _run_real(opts: opts_mod.Options, log: RunLog, shutter: Shutter) -> list[Rou
                     break
             finally:
                 quit_driver(driver)
+                # Kill only Firefox processes that appeared during this round
+                # so we don't touch a user's pre-existing Firefox session.
+                current_pids = running_firefox_pids()
+                new_pids = current_pids - round_start_pids
+                if new_pids:
+                    kill_firefox_pids(new_pids)
+                # Brief pause to let processes settle before next round.
+                time.sleep(1.0)
     finally:
         shutil.rmtree(cloned.parent, ignore_errors=True)
-    return results
+    return results, pre_existing_pids
 
+
+def _run_bing_news_session(
+    opts: opts_mod.Options, log: RunLog, shutter: Shutter
+) -> BingNewsResult | None:
+    """Launch a fresh Firefox session for Bing news reading."""
+    profile_src = find_profile_directory(opts.profile_name)
+    cloned = clone_profile(profile_src)
+    driver = None
+    session_start_pids: set[int] = set()
+    try:
+        session_start_pids = running_firefox_pids()
+        logger.info('starting Firefox for Bing News round')
+        driver = start_driver(
+            cloned,
+            desktop_user_agent=opts_mod.DESKTOP_AGENT,
+            options=opts,
+        )
+        session = RealSession(driver, 'desktop')
+        ok, detail = session.signed_in()
+        if not ok:
+            log.event(f'Bing News: NOT signed in ({detail}) — aborting')
+            return None
+        result = run_bing_news(driver)
+        log.event(f'Bing News: {result.summary()}')
+        return result
+    except Exception as e:  # noqa: BLE001
+        logger.warning('bing news run failed: %s', e)
+        log.event(f'Bing News: failed — {e}')
+        return None
+    finally:
+        if driver:
+            quit_driver(driver)
+            current_pids = running_firefox_pids()
+            new_pids = current_pids - session_start_pids
+            if new_pids:
+                kill_firefox_pids(new_pids)
+            time.sleep(1.0)
+        shutil.rmtree(cloned.parent, ignore_errors=True)
+
+
+def _run_outlook_session(
+    opts: opts_mod.Options, log: RunLog, shutter: Shutter
+) -> OutlookResult | None:
+    """Launch a fresh Firefox session for Outlook email reading."""
+    profile_src = find_profile_directory(opts.profile_name)
+    cloned = clone_profile(profile_src)
+    driver = None
+    session_start_pids: set[int] = set()
+    try:
+        session_start_pids = running_firefox_pids()
+        logger.info('starting Firefox for Outlook round')
+        driver = start_driver(
+            cloned,
+            desktop_user_agent=opts_mod.DESKTOP_AGENT,
+            options=opts,
+        )
+        session = RealSession(driver, 'desktop')
+        ok, detail = session.signed_in()
+        if not ok:
+            log.event(f'Outlook: NOT signed in ({detail}) — aborting')
+            return None
+        result = run_outlook_emails(driver)
+        log.event(f'Outlook: {result.summary()}')
+        return result
+    except Exception as e:  # noqa: BLE001
+        logger.warning('outlook run failed: %s', e)
+        log.event(f'Outlook: failed — {e}')
+        return None
+    finally:
+        if driver:
+            quit_driver(driver)
+            current_pids = running_firefox_pids()
+            new_pids = current_pids - session_start_pids
+            if new_pids:
+                kill_firefox_pids(new_pids)
+            time.sleep(1.0)
+        shutil.rmtree(cloned.parent, ignore_errors=True)
 
 def _run_daily_set_session(
     opts: opts_mod.Options, log: RunLog, shutter: Shutter
@@ -108,12 +216,11 @@ def _run_daily_set_session(
     None if the session cannot even sign in.
     """
     profile_src = find_profile_directory(opts.profile_name)
-    if firefox_is_running():
-        logger.warning('Firefox is running — quitting so the Daily Set clone gets fresh cookies')
-        quit_firefox()
     cloned = clone_profile(profile_src)
     driver = None
+    session_start_pids: set[int] = set()
     try:
+        session_start_pids = running_firefox_pids()
         logger.info('starting Firefox for Daily Set round')
         driver = start_driver(
             cloned,
@@ -135,6 +242,11 @@ def _run_daily_set_session(
     finally:
         if driver:
             quit_driver(driver)
+            current_pids = running_firefox_pids()
+            new_pids = current_pids - session_start_pids
+            if new_pids:
+                kill_firefox_pids(new_pids)
+            time.sleep(1.0)
         shutil.rmtree(cloned.parent, ignore_errors=True)
 
 
@@ -151,7 +263,10 @@ def _run_dry(opts: opts_mod.Options, log: RunLog) -> list[RoundResult]:
 
 
 def _report(
-    log: RunLog, results: list[RoundResult], daily_set_result: DailySetResult | None = None
+    log: RunLog, results: list[RoundResult],
+    daily_set_result: DailySetResult | None = None,
+    bing_news_result: BingNewsResult | None = None,
+    outlook_result: OutlookResult | None = None,
 ) -> int:
     verdict, reasons = _verdict(results)
     print()
@@ -180,6 +295,18 @@ def _report(
             f'  dailySet: {daily_set_result.cards_clicked}/'
             f'{daily_set_result.cards_found} clicked, '
             f'{daily_set_result.cards_skipped} skipped{pts_str}'
+        )
+    if bing_news_result is not None:
+        print(
+            f'  bingNews: {bing_news_result.articles_read}/'
+            f'{bing_news_result.articles_found} read, '
+            f'{bing_news_result.articles_skipped} skipped'
+        )
+    if outlook_result is not None:
+        print(
+            f'  outlook:  {outlook_result.emails_read}/'
+            f'{outlook_result.emails_found} read, '
+            f'{outlook_result.emails_skipped} skipped'
         )
     for note in _all_notes(log, results):
         print(f'    • {note}')

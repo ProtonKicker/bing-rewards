@@ -105,21 +105,42 @@ def run_daily_set(driver) -> DailySetResult:
     status_before = rewards.read_status(driver)
     result.points_before = status_before.points
 
-    # Navigate to the earn page (most cards render here, not on /dashboard).
-    try:
-        driver.get('https://rewards.bing.com/earn')
-        WebDriverWait(driver, 12, poll_frequency=0.5).until(
-            lambda d: d.find_elements(By.CSS_SELECTOR, ACTIVITY_LINK_SELECTOR) or
-                      'earn' in d.current_url.lower()
-        )
-        # Cards render asynchronously — give the SPA a moment to populate.
-        time.sleep(2.0 + random.uniform(0, 2.0))
-    except (TimeoutException, Exception) as exc:
-        logger.warning('could not reach /earn page (%s)', exc)
-        result.details.append(f'earn page load failed: {exc}')
+    # Try multiple earn page URLs — Bing sometimes serves cards on different pages
+    earn_urls = [
+        'https://rewards.bing.com/earn',
+        'https://rewards.bing.com/',
+        'https://rewards.bing.com/dashboard',
+    ]
+    cards = []
+    for earn_url in earn_urls:
+        try:
+            driver.get(earn_url)
+            WebDriverWait(driver, 20, poll_frequency=0.5).until(
+                lambda d: d.find_elements(By.CSS_SELECTOR, ACTIVITY_LINK_SELECTOR) or
+                          'rewards' in d.current_url.lower()
+            )
+            time.sleep(5.0 + random.uniform(0, 3.0))
+            cards = _find_cards(driver)
+            if cards:
+                break
+        except (TimeoutException, Exception) as exc:
+            logger.debug('earn page %s failed: %s', earn_url, exc)
+            continue
+
+    if not cards:
+        # Last resort: try refreshing the current page
+        try:
+            driver.refresh()
+            time.sleep(5.0)
+            cards = _find_cards(driver)
+        except Exception:
+            pass
+
+    if not cards:
+        logger.info('no uncompleted card-like activity links found on any earn page')
+        result.details.append('all cards already clicked (or none available yet)')
         _read_final_balance(driver, result)
         return result
-
     # Save the balance one more time on the /earn page — the medallion on this
     # page rounds to the last privacy-safe multiple sometimes, so we prefer the
     # read_status path. If both agree, great; if they differ by a few points
@@ -128,10 +149,10 @@ def run_daily_set(driver) -> DailySetResult:
     if medallion is not None and medallion.points is not None:
         result.points_before = medallion.points
 
-    cards = _find_cards(driver)
-    # Cap: clicking > 10 cards in one session is suspicious. Prioritize
+    # Cap: clicking many cards in one session is fine for rewards. Prioritize
     # URL-patterns that look like one-click daily activities (Bing search
     # redirects and reward checkuser endpoints) over media/landing pages.
+    # Raised from 10 to 40 to maximize daily activity points.
     priority = []
     secondary = []
     for card in cards:
@@ -143,7 +164,7 @@ def run_daily_set(driver) -> DailySetResult:
             priority.append(card)
         else:
             secondary.append(card)
-    cards = (priority + secondary)[:10]
+    cards = (priority + secondary)[:40]
     result.cards_found = len(cards)
     if not cards:
         logger.info('no uncompleted card-like activity links on /earn')

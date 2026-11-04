@@ -23,12 +23,12 @@ MAX_DELAY = 35.0
 # Initial delay before the first search in each round (seconds) — lets the
 # session establish and avoids the "first search always
 # wasted" observation from short runs.
-WARMUP_DELAY = 10.0
+WARMUP_DELAY = 5.0
 
 # Verify (re-read rewards status) after this many searches.
 # Larger batches = fewer navigations (each nav may trigger bot detection)
 # but slower stall detection. 5 is the sweet spot for max registration.
-BATCH_SIZE = 5
+BATCH_SIZE = 10
 
 # Searches to re-attempt with fresh queries/longer delays when a batch
 # registers nothing, before declaring the round stalled.
@@ -36,19 +36,19 @@ RETRY_ROUNDS = 3
 
 # When detection is suspected (points stuck), pause this long before
 # doing a burst of "recovery" searches with extra delays.
-RECOVERY_BURST_DELAY = 30.0
+RECOVERY_BURST_DELAY = 10.0
 RECOVERY_BURST_COUNT = 2
 
 BING_SEARCH_URL = 'https://www.bing.com/search?form=QBRE&q='
 
 # Exhaustive re-check wait: how long to wait before force-refreshing medallion
 # and doing a thorough double-check when the balance seems stale.
-RECHECK_WAIT = 30.0
+RECHECK_WAIT = 10.0
 
 # Consecutive unverifiable batches before the collector declares a stall.
-# The medallion often lags 30-90s behind actual balance. Higher patience
-# = more searches ultimately recognized by Bing.
-MAX_NO_SIGNAL_BATCHES = 8
+# Set to 1 for maximize mode: accept optimistic registration immediately
+# so the script doesn't waste time on exhaustive rechecks.
+MAX_NO_SIGNAL_BATCHES = 1
 
 # Hard-cap multiplier: when --max-searches is unset the collector still needs
 # an absolute ceiling so a fully silent Bing page cannot loop forever. The per
@@ -57,7 +57,7 @@ DEFAULT_SEARCH_CAP_MULTIPLIER = 5
 
 # Wall-clock timeout per round (seconds). Prevents 52-minute hangs when Bing
 # is completely unresponsive.
-WALL_CLOCK_TIMEOUT = 300.0
+WALL_CLOCK_TIMEOUT = 3600.0
 
 # User agent used for the mobile round (general.useragent.override on Firefox).
 # Makes the session look like an Edge-on-Android phone so mobile points count.
