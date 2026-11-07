@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 # bar). Navigation links ("Dashboard", "Earn", "Redeem") share the same
 # CSS tokens — we must filter them out rigorously.
 ACTIVITY_LINK_SELECTOR = (
-    'a.cursor-pointer.group[href*="bing.com"]'  # Bing redirect activity links
+    'a[class*="cursor-pointer"][href*="bing.com"]'  # Bing activity cards
     ', a[href*="/ck/a"]'   # Bing check/award redirect (most daily cards)
     ', .daily-set a[href]'  # daily-set section links
     ', .gamification a[href]'  # gamification activity links
@@ -62,6 +62,7 @@ POINTS_BADGE_RE = (r'\+\s*(\d+)\s*(pts|points)?')
 NAV_LINK_TEXT = frozenset({
     'dashboard', 'earn', 'redeem', 'about', 'refer and earn',
     'rewards', 'home', 'profile', 'settings', 'help',
+    'english', 'sign in', 'sign out', 'language',
 })
 
 
@@ -280,6 +281,9 @@ def _is_activity_url(href: str) -> bool:
             return False
         if path.startswith('/api/') and '/activity' in path:
             return True
+        # Allow quest/punchcard/goal pages — they are earnable activities
+        if path.startswith('/earn/quest/') or path.startswith('/goal/'):
+            return True
         if '?' in h:
             return True
         return False
@@ -333,7 +337,12 @@ def _card_label(link) -> str:
 
 
 def _is_card_completed(link) -> bool:
-    """Best-effort: does the mark the card as completed / claimed?"""
+    """Best-effort: does the card show as completed / claimed?
+
+    Only inspects the link element itself (never ancestors) to avoid
+    false positives from page-wide container text. Completed cards also
+    expose ``data-disabled="true"`` (Tailwind-style disabled state).
+    """
     try:
         a11y = ''
         for attr in ('aria-label', 'title'):
@@ -345,20 +354,20 @@ def _is_card_completed(link) -> bool:
         if any(word in a11y for word in COMPLETED_TEXT):
             return True
 
-        # Completed cards get a ✓ inserted as a pseudo-element or icon span.
-        # Detect it by looking for a common sibling/ancestor class.
-        parent = link
-        for _ in range(4):
-            try:
-                outer = parent.get_attribute('outerHTML') or ''
-                if ('✓' in outer or 'completed' in outer.lower() or
-                        'claimed' in outer.lower()):
-                    return True
-                parent = parent.find_element(By.XPATH, '..')
-            except (NoSuchElementException, StaleElementReferenceException):
-                break
-            except Exception:
-                break
+        # Disabled state attribute — Bing sets this on finished cards.
+        try:
+            if (link.get_attribute('data-disabled') or '').lower() == 'true':
+                return True
+        except Exception:
+            pass
+
+        # Check only the link's own markup for a checkmark icon.
+        try:
+            outer = link.get_attribute('outerHTML') or ''
+            if '✓' in outer or 'checkmark' in outer.lower():
+                return True
+        except Exception:
+            pass
     except Exception:
         pass
     return False
