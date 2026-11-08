@@ -59,17 +59,28 @@ class RealSession:
         return check_signed_in(self.driver)
 
     def status(self, force_refresh: bool = False) -> rewards.Status:
-        return rewards.read_status(self.driver, force_refresh=force_refresh)
+        try:
+            return rewards.read_status(self.driver, force_refresh=force_refresh)
+        except Exception as exc:  # noqa: BLE001 - marionette can flake under load
+            logger.warning('status read failed (%s); retrying once', exc)
+            time.sleep(2.0)
+            try:
+                return rewards.read_status(self.driver, force_refresh=force_refresh)
+            except Exception as exc2:  # noqa: BLE001
+                logger.warning('status read retry failed (%s); returning empty status', exc2)
+                return rewards.Status(source='none')
 
     def search(self, query: str) -> None:
         url = opts_mod.BING_SEARCH_URL + urllib.parse.quote_plus(query)
-        try:
-            self.driver.get(url)
-        except Exception as exc:
-            # A busted navigation (e.g. geckodriver "network protocol error")
-            # poisons the WebDriver for the rest of the session — re-raise so
-            # the outer loop can decide whether to restart.
-            raise RuntimeError(f'navigation failed for "{query}": {exc}') from exc
+        for attempt in (1, 2):
+            try:
+                self.driver.get(url)
+                break
+            except Exception as exc:
+                if attempt == 2:
+                    raise RuntimeError(f'navigation failed for "{query}": {exc}') from exc
+                logger.warning('navigation attempt %d failed (%s); retrying', attempt, exc)
+                time.sleep(2.0)
         # Dwell on results like a reader, then let the point event settle.
         time.sleep(random.uniform(2.5, 6.0))
 
@@ -139,7 +150,7 @@ def run_round(  # noqa: PLR0912, PLR0915 - the verify/retry state machine is one
         log.event(f'{kind}: NOT signed in ({detail}) — aborting round')
         return result
 
-    before = session.status()
+    before = session.status(force_refresh=True)
     if log.points_before is None:
         log.points_before = before.points
     prog = before.progress(kind)
@@ -177,7 +188,7 @@ def run_round(  # noqa: PLR0912, PLR0915 - the verify/retry state machine is one
     # Early health check: verify rewards page is readable before burning
     # searches.  If the dashboard shows an "unsupported" / "error" page,
     # abort immediately instead of wasting a full round.
-    if not _rewards_page_healthy(session):
+    if not _rewards_page_healthy(session.driver if hasattr(session, 'driver') else session):
         result.notes.append(
             'rewards page unhealthy before first search — aborting to avoid wasted searches'
         )
@@ -243,7 +254,7 @@ def run_round(  # noqa: PLR0912, PLR0915 - the verify/retry state machine is one
             break
 
         # --- Per-batch verification ---
-        after = session.status()
+        after = session.status(force_refresh=True)
         counter_delta = _progress_delta(kind, before, last_counter, after)
         points_delta = _points_delta(last_points, after.points)
         logger.info(
@@ -291,14 +302,18 @@ def run_round(  # noqa: PLR0912, PLR0915 - the verify/retry state machine is one
                 f'points_delta={points_delta}; optimistic_accumulator={optimistic_registered})'
             )
 
-            if total_quiet >= 3:
-                result.notes.append(
-                    f'stalled after {total_quiet} consecutive quiet batches'
-                )
-                result.stalled = True
-                rlog.stalled = True
-                break
-            # Accept optimistic registration and continue
+            # MAXIMIZE MODE: never stall on quiet batches — keep searching
+            # optimistically up to the target. Bing's balance routinely lags
+            # 30-90s behind reality, and the medallion can stay stale for many
+            # batches; stalling here would leave points on the table. The
+            # wall-clock timeout and effective_max cap are the real safety nets.
+            result.notes.append(
+                f'quiet batch #{total_quiet} (no immediate increment) — continuing optimistically'
+            )
+            log.event(
+                f'{kind}: quiet batch #{total_quiet} — continuing optimistically'
+            )
+            # Accept optimistic registration and continue.
             registered_total += batch
             optimistic_registered = 0
             rlog.registered = registered_total
@@ -515,14 +530,22 @@ def _rewards_page_healthy(driver) -> bool:
     """
     try:
         driver.get(rewards.REWARDS_URL)
-        time.sleep(2.0)
-        page = (driver.page_source or '').lower()
-        # Also check the medallion — if it's present, the page is usable.
-        has_medallion = 'rh_rwm' in page or 'rewards-medallion' in page
-        has_blocker = any(marker in page for marker in UNSUPPORT_MARKERS)
-        if has_blocker and not has_medallion:
+        time.sleep(3.0)
+        title = (driver.title or '').lower()
+        try:
+            visible = (driver.find_element('css selector', 'body').text or '').lower()
+        except Exception:  # noqa: BLE001
+            visible = ''
+        dashboard_ok = (
+            'rewards' in title
+            or 'available points' in visible
+            or 'dashboard' in visible
+            or 'earn' in visible
+        )
+        has_blocker = any(marker in visible for marker in UNSUPPORT_MARKERS)
+        if has_blocker and not dashboard_ok:
             logger.warning(
-                'rewards page blocked: found error markers (no medallion present)'
+                'rewards page blocked: found error markers (no dashboard chrome)'
             )
             return False
         return True

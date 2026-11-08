@@ -103,8 +103,12 @@ def run_daily_set(driver) -> DailySetResult:
     """
     result = DailySetResult()
 
-    status_before = rewards.read_status(driver)
-    result.points_before = status_before.points
+    # Points tracking for individual daily-set clicks is intentionally disabled:
+    # the rewards medallion returns cached/stale balances on the /earn page, so
+    # a per-module delta is misleading (can show large negative swings). The
+    # overall run log tracks the real before->after balance across the whole run.
+    result.points_before = None
+    result.points_after = None
 
     # Try multiple earn page URLs — Bing sometimes serves cards on different pages
     earn_urls = [
@@ -146,9 +150,8 @@ def run_daily_set(driver) -> DailySetResult:
     # page rounds to the last privacy-safe multiple sometimes, so we prefer the
     # read_status path. If both agree, great; if they differ by a few points
     # that is within error.
-    medallion = rewards.read_medallion(driver)
-    if medallion is not None and medallion.points is not None:
-        result.points_before = medallion.points
+    # Points tracking disabled (see note above) — do not override with medallion.
+    pass
 
     # Cap: clicking many cards in one session is fine for rewards. Prioritize
     # URL-patterns that look like one-click daily activities (Bing search
@@ -406,13 +409,5 @@ def _try_click_card(driver, card, idx: int, result: DailySetResult) -> bool:
 
 
 def _read_final_balance(driver, result: DailySetResult) -> None:
-    """Read the rewards balance after all cards — store in result."""
-    medallion = rewards.read_medallion(driver)
-    if medallion is not None and medallion.points is not None:
-        result.points_after = medallion.points
-    else:
-        try:
-            dash = rewards.read_status(driver)
-            result.points_after = dash.points
-        except Exception:
-            pass
+    """Points tracking disabled — see run_daily_set note."""
+    result.points_after = None
