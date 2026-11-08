@@ -113,6 +113,7 @@ class Options:
     runs_dir: Path = Path('runs')
     screenshots_dir: Path | None = Path('docs/screenshots')
     force: bool = False  # ignore today's run log
+    outlook: bool = False  # no Outlook mailbox (user has none) — skip the round
     verbose: bool = False
 
 
@@ -200,6 +201,11 @@ def parse_args(argv: list[str] | None = None) -> Options:
     )
     p.add_argument('--no-screenshots', action='store_true', dest='screenshots_off')
     p.add_argument(
+        '--outlook',
+        action='store_true',
+        help='enable Outlook email reading round (default: skipped — no mailbox)',
+    )
+    p.add_argument(
         '--force',
         action='store_true',
         help="redo rounds even if today's run log says they are complete",
@@ -226,6 +232,7 @@ def parse_args(argv: list[str] | None = None) -> Options:
     opts.runs_dir = args.runs_dir
     opts.screenshots_dir = None if args.screenshots_off else args.screenshots_dir
     opts.force = args.force
+    opts.outlook = args.outlook
     opts.verbose = args.verbose
     return opts
 

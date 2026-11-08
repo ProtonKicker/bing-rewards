@@ -67,7 +67,10 @@ def main(argv: list[str] | None = None) -> int:
         if last_round.signed_in:
             daily_set_result = _run_daily_set_session(opts, log, shutter)
             bing_news_result = _run_bing_news_session(opts, log, shutter)
-            outlook_result = _run_outlook_session(opts, log, shutter)
+            if opts.outlook:
+                outlook_result = _run_outlook_session(opts, log, shutter)
+            else:
+                log.event('Outlook: skipped (no mailbox — pass --outlook to enable)')
 
     # Final cleanup: if the script launched Firefox (no user Firefox at start),
     # make sure it is quit now.
