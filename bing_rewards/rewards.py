@@ -256,47 +256,55 @@ def read_status(driver, force_refresh: bool = False) -> Status:
     3. Dashboard DOM scrape as cross-check.
     4. JavaScript balance API as final fallback.
     """
+    # Capture search progress from bing.com page source BEFORE any navigation.
+    _search_earned = None
+    _search_limit = None
+    _on_bing_initially = 'bing.com' in (driver.current_url or '')
+    if _on_bing_initially:
+        # Wait for the page to fully render (DailySearchPointsEarned is loaded async).
+        time.sleep(3.0)
+        try:
+            _ps = driver.page_source or ''
+            _m_e = re.search(r'"DailySearchPointsEarned"\s*:\s*(\d+)', _ps)
+            _m_l = re.search(r'"DailySearchPointsLimit"\s*:\s*(\d+)', _ps)
+            if _m_e and _m_l:
+                _search_earned = int(_m_e.group(1))
+                _search_limit = int(_m_l.group(1))
+                logger.debug('bing.com page: daily search points %d/%d', _search_earned, _search_limit)
+        except Exception:
+            pass
+
     # If we're on a search page, the medallion may be stale — force a refresh
     # when explicitly requested to get the freshest balance.
     if force_refresh and 'bing.com' in (driver.current_url or ''):
-        medallion_fresh = read_medallion(driver, force_refresh=True)
-        if medallion_fresh is not None and medallion_fresh.points is not None:
-            logger.debug('read_status: fresh medallion balance=%s', medallion_fresh.points)
-            # Still try to get per-card quota from APIs
-            api_status = _try_all_status_apis(driver)
-            if api_status is not None:
-                if (
-                    medallion_fresh.desktop.maximum is None
-                    and api_status.desktop.maximum is not None
-                ):
-                    medallion_fresh.desktop = api_status.desktop
-                if (
-                    medallion_fresh.mobile.maximum is None
-                    and api_status.mobile.maximum is not None
-                ):
-                    medallion_fresh.mobile = api_status.mobile
-                medallion_fresh.source = f'{medallion_fresh.source}+api'
-            return medallion_fresh
+        # The medallion balance is cached/stale. Navigate to rewards.bing.com
+        # for the authoritative balance instead of trusting the medallion.
+        logger.debug('read_status: force_refresh — reading authoritative balance from rewards.bing.com')
+        # Fall through to the rewards.bing.com scrape below for the real balance.
+        pass
 
     # Try the rewards APIs first for per-card progress (cheap — no navigation).
     api_status = _try_all_status_apis(driver)
 
-    # Read medallion on bing.com (cheaper than dashboard DOM navigation).
-    medallion: Status | None = None
-    on_bing = 'bing.com' in (driver.current_url or '')
-    if on_bing:
-        medallion = read_medallion(driver)
-        if medallion is not None and medallion.points is not None:
-            if api_status is not None:
-                if medallion.desktop.maximum is None and api_status.desktop.maximum is not None:
-                    medallion.desktop = api_status.desktop
-                if medallion.mobile.maximum is None and api_status.mobile.maximum is not None:
-                    medallion.mobile = api_status.mobile
-                medallion.source = f'{medallion.source}+api'
-            return medallion
+    # The medallion balance is stale (cached). Do NOT return it as
+    # authoritative. Always navigate to rewards.bing.com for the real balance.
+    # Parse search progress from the bing.com page source instead.
+    # Apply pre-captured search progress (from bing.com page source).
+    if _search_earned is not None and _search_limit is not None:
+        if _search_earned >= _search_limit:
+            logger.info('daily search cap FULL (%d/%d) — searches will be skipped', _search_earned, _search_limit)
+        else:
+            logger.info('daily search progress: %d/%d', _search_earned, _search_limit)
 
     # Dashboard DOM scrape — more expensive (navigation required) but authoritative.
     dash = _read_status_from_dashboard(driver)
+    # Apply search progress (if cap is full, mark both as complete).
+    try:
+        if _search_earned is not None and _search_limit is not None and _search_earned >= _search_limit:
+            dash.desktop = Progress(_search_limit, _search_limit)
+            dash.mobile = Progress(_search_limit, _search_limit)
+    except NameError:
+        pass
 
     # Merge API per-card progress into the dashboard result (keep the
     # dashboard's balance, which is always fresher than the API's).
@@ -437,18 +445,23 @@ def _read_status_from_dashboard(driver) -> Status:
     except Exception:
         page_text = ''
 
-    # Find balance: the first large standalone number (>= 1000) on the page,
-    # typically "4,898" or "4,898 points". Skip progress sub-quotas like 3,500.
-    for line in page_text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        m = re.search(r'\b([\d,]{4,})\b', line)
-        if m:
-            value = _int_or_none(m.group(1).replace(',', ''))
-            if value and value >= 1000:
-                status.points = value
+    # Find balance: look for "Available points" label followed by the number.
+    lines = [ln.strip() for ln in page_text.splitlines() if ln.strip()]
+    for i, line in enumerate(lines):
+        if 'available points' in line.lower() and i + 1 < len(lines):
+            val = _int_or_none(lines[i + 1].replace(',', ''))
+            if val is not None and val >= 100:
+                status.points = val
                 break
+    # Fallback: first standalone number >= 1000 (skip sub-quotas like 3,500).
+    if status.points is None:
+        for line in lines:
+            m = re.search(r'\b([\d,]{4,})\b', line)
+            if m:
+                value = _int_or_none(m.group(1).replace(',', ''))
+                if value and value >= 1000 and value not in (3500, 700, 350):
+                    status.points = value
+                    break
 
     # --- Parse progress counters ---
     # Multiple layouts seen in the wild:

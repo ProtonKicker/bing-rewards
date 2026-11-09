@@ -317,6 +317,8 @@ def run_round(  # noqa: PLR0912, PLR0915 - the verify/retry state machine is one
             registered_total += batch
             optimistic_registered = 0
             rlog.registered = registered_total
+            if after.points is not None:
+                log.points_after = after.points
             continue
         else:
             # Negative counter/points delta (shouldn't happen normally).
