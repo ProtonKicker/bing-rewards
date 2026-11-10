@@ -300,11 +300,21 @@ def read_status(driver, force_refresh: bool = False) -> Status:
     dash = _read_status_from_dashboard(driver)
     # Apply search progress (if cap is full, mark both as complete).
     try:
-        if _search_earned is not None and _search_limit is not None and _search_earned >= _search_limit:
-            dash.desktop = Progress(_search_limit, _search_limit)
-            dash.mobile = Progress(_search_limit, _search_limit)
-    except NameError:
-        pass
+        _ua = (driver.execute_script('return navigator.userAgent;') or '').lower()
+    except Exception:
+        _ua = ''
+    _kind = 'mobile' if ('mobile' in _ua or 'android' in _ua or 'iphone' in _ua) else 'desktop'
+    if _search_earned is not None and _search_limit is not None:
+        try:
+            setattr(dash, _kind, Progress(_search_earned, _search_limit))
+        except Exception:
+            pass
+    if _search_earned is not None and _search_limit is not None and _search_earned >= _search_limit:
+        try:
+            other = 'mobile' if _kind == 'desktop' else 'desktop'
+            setattr(dash, other, Progress(_search_limit, _search_limit))
+        except Exception:
+            pass
 
     # Merge API per-card progress into the dashboard result (keep the
     # dashboard's balance, which is always fresher than the API's).
@@ -486,13 +496,19 @@ def _read_status_from_dashboard(driver) -> Status:
             if len(prev_lines) > 2:
                 prev_lines = prev_lines[-2:]
             continue
+        # Guard: daily search quotas never exceed 200; skip monthly/level bonuses.
+        if mx > 200:
+            prev_lines.append(line)
+            if len(prev_lines) > 2:
+                prev_lines = prev_lines[-2:]
+            continue
         # Combine surrounding lines for context.
         context = line.lower() + ' ' + ' '.join(prev_lines[-2:]).lower()
         prog = Progress(cur, mx)
         if 'mobile' in context or 'phone' in context or 'android' in context:
             if status.mobile.maximum is None or (mx and mx > (status.mobile.maximum or 0)):
                 status.mobile = prog
-        elif 'search' in context or 'desktop' in context or 'pc' in context or 'bing' in context:
+        elif 'search' in context or 'desktop' in context or 'pc' in context:
             if status.desktop.maximum is None or (mx and mx > (status.desktop.maximum or 0)):
                 status.desktop = prog
         elif status.desktop.current is None and mx in _SEARCH_QUOTAS:

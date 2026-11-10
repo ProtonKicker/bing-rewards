@@ -48,7 +48,7 @@ RECHECK_WAIT = 10.0
 # Consecutive unverifiable batches before the collector declares a stall.
 # Set to 1 for maximize mode: accept optimistic registration immediately
 # so the script doesn't waste time on exhaustive rechecks.
-MAX_NO_SIGNAL_BATCHES = 1
+MAX_NO_SIGNAL_BATCHES = 3
 
 # Hard-cap multiplier: when --max-searches is unset the collector still needs
 # an absolute ceiling so a fully silent Bing page cannot loop forever. The per

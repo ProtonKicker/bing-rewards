@@ -341,7 +341,7 @@ def _verdict(results: list[RoundResult]) -> tuple[str, list[str]]:
     skipped = [r.kind for r in results if r.skipped_reason]
     if len(skipped) == len(results):
         return 'SUCCESS', [f'all rounds already complete today ({", ".join(skipped)})']
-    if registered == 0:
+    if registered == 0 and not complete:
         reasons.append(f'{attempted} searches registered nothing — verification failed')
         return 'FAIL', reasons
     if complete and not stalled:

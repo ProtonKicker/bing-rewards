@@ -139,6 +139,14 @@ def run_round(  # noqa: PLR0912, PLR0915 - the verify/retry state machine is one
         result.complete = True
         result.signed_in = True
         result.registered = rlog.registered
+        try:
+            _s = session.status(force_refresh=True)
+            if log.points_after is None and _s.points is not None:
+                log.points_after = _s.points
+            if log.points_before is None and _s.points is not None:
+                log.points_before = _s.points
+        except Exception:
+            pass
         log.event(f'{kind}: skipped ({result.skipped_reason})')
         return result
 
@@ -159,7 +167,7 @@ def run_round(  # noqa: PLR0912, PLR0915 - the verify/retry state machine is one
     result.target = prog.maximum or fallback
     # Sanity cap: the live API occasionally returns monthly bonus numbers
     # (e.g. 3 500) instead of the daily search quota. Clamp to a sane max.
-    sane_cap = 120 if kind == 'desktop' else 40
+    sane_cap = 100000  # points-based now; no artificial clamp
     if result.target > sane_cap:
         result.target = sane_cap
     if prog.maximum is None:
@@ -169,6 +177,8 @@ def run_round(  # noqa: PLR0912, PLR0915 - the verify/retry state machine is one
     if prog.complete:
         result.complete = True
         rlog.complete = True
+        if log.points_after is None:
+            log.points_after = before.points
         log.event(f'{kind}: quota already complete ({start_current}/{result.target})')
         return result
 
@@ -212,7 +222,7 @@ def run_round(  # noqa: PLR0912, PLR0915 - the verify/retry state machine is one
     # when --max-searches is not given.
     effective_max = opts.max_searches
     if effective_max is None:
-        effective_max = result.target * opts_mod.DEFAULT_SEARCH_CAP_MULTIPLIER
+        effective_max = 100  # absolute search ceiling per round
 
     while True:
         if _time.monotonic() - _round_start > _WALL_CLOCK_TIMEOUT:
@@ -280,6 +290,7 @@ def run_round(  # noqa: PLR0912, PLR0915 - the verify/retry state machine is one
             rlog.registered = registered_total
             zero_delta_batches = 0
             no_signal_batches = 0
+            last_counter = after.counter(kind) or last_counter
             if after.progress(kind).maximum is None:
                 result.notes.append('using point deltas (search counter unavailable)')
         elif (
@@ -302,11 +313,15 @@ def run_round(  # noqa: PLR0912, PLR0915 - the verify/retry state machine is one
                 f'points_delta={points_delta}; optimistic_accumulator={optimistic_registered})'
             )
 
-            # MAXIMIZE MODE: never stall on quiet batches — keep searching
-            # optimistically up to the target. Bing's balance routinely lags
-            # 30-90s behind reality, and the medallion can stay stale for many
-            # batches; stalling here would leave points on the table. The
-            # wall-clock timeout and effective_max cap are the real safety nets.
+            # Stall detection: after N consecutive quiet batches, assume cap reached.
+            if total_quiet >= getattr(opts_mod, 'MAX_NO_SIGNAL_BATCHES', 3):
+                result.stalled = True
+                rlog.stalled = True
+                result.notes.append(
+                    f'quiet batch #{total_quiet} — stalling (cap reached)'
+                )
+                log.event(f'{kind}: stalled after {attempted} searches — stopping round')
+                break
             result.notes.append(
                 f'quiet batch #{total_quiet} (no immediate increment) — continuing optimistically'
             )
