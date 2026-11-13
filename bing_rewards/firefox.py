@@ -210,7 +210,7 @@ def start_driver(
 
     service = Service(executable_path=str(options.geckodriver)) if options.geckodriver else Service()
     driver = webdriver.Firefox(service=service, options=ffox)
-    driver.set_page_load_timeout(120)
+    driver.set_page_load_timeout(90)
     # Set viewport size: mobile gets a phone viewport, desktop a standard one.
     if mobile_user_agent:
         driver.set_window_size(412, 915)  # Pixel-ish viewport for the mobile card

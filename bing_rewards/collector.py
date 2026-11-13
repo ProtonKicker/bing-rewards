@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Protocol
 from bing_rewards import options as opts_mod
 from bing_rewards import rewards
 from bing_rewards.firefox import check_signed_in
+from selenium.common.exceptions import TimeoutException, WebDriverException
 from bing_rewards.queries import QueryGenerator
 
 if TYPE_CHECKING:
@@ -76,6 +77,14 @@ class RealSession:
             try:
                 self.driver.get(url)
                 break
+            except (TimeoutException, WebDriverException) as exc:
+                logger.warning('navigation attempt %d failed (%s); retrying', attempt, exc)
+                if attempt == 2:
+                    # Swallow so a single bad/slow page doesn't kill the whole round.
+                    logger.warning('skipping search %r after 2 failed attempts', query)
+                    time.sleep(2.0)
+                    return
+                time.sleep(5.0)
             except Exception as exc:
                 if attempt == 2:
                     raise RuntimeError(f'navigation failed for "{query}": {exc}') from exc
