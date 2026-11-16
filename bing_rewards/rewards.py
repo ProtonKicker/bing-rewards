@@ -299,20 +299,21 @@ def read_status(driver, force_refresh: bool = False) -> Status:
     # Dashboard DOM scrape — more expensive (navigation required) but authoritative.
     dash = _read_status_from_dashboard(driver)
     # Apply search progress (if cap is full, mark both as complete).
+    # NOTE (2026-11): the bing.com page-source fields (DailySearchPointsEarned /
+    # Limit) are frequently STALE (cached from a previous maxed-out day) and are
+    # SHARED between devices. Using them to force-complete a round caused mobile
+    # to register 0 for days. Now they are only used to FILL a kind's progress
+    # when the DOM scrape yielded nothing, and never to mark either kind complete.
     try:
         _ua = (driver.execute_script('return navigator.userAgent;') or '').lower()
     except Exception:
         _ua = ''
     _kind = 'mobile' if ('mobile' in _ua or 'android' in _ua or 'iphone' in _ua) else 'desktop'
-    if _search_earned is not None and _search_limit is not None:
+    if _search_earned is not None and _search_limit is not None and _search_earned < _search_limit:
         try:
-            setattr(dash, _kind, Progress(_search_earned, _search_limit))
-        except Exception:
-            pass
-    if _search_earned is not None and _search_limit is not None and _search_earned >= _search_limit:
-        try:
-            other = 'mobile' if _kind == 'desktop' else 'desktop'
-            setattr(dash, other, Progress(_search_limit, _search_limit))
+            cur = getattr(dash, _kind)
+            if cur.maximum is None:
+                setattr(dash, _kind, Progress(min(_search_earned, _search_limit), _search_limit))
         except Exception:
             pass
 
