@@ -143,6 +143,67 @@ def kill_firefox_pids(pids: set[int]) -> None:
         time.sleep(0.5)
 
 
+def prune_stale_clones(age_seconds: float = 86400) -> int:
+    """Delete leftover bing-rewards-profile-* temp clones older than age_seconds.
+
+    Clones are removed on graceful exit, but interrupted runs (kill, crash,
+    timeout, reboot) leave them behind. Each clone is ~1.6GB, so orphans
+    accumulate quickly. Call this at startup to self-heal the temp dir.
+    Returns how many directories were removed.
+    """
+    removed = 0
+    tmp_root = Path(tempfile.gettempdir())
+    for child in tmp_root.iterdir():
+        if not child.name.startswith('bing-rewards-profile-'):
+            continue
+        try:
+            if time.time() - child.stat().st_mtime > age_seconds:
+                shutil.rmtree(child, ignore_errors=True)
+                removed += 1
+        except OSError:
+            continue
+    if removed:
+        logger.info('pruned %d stale temp profile clone(s)', removed)
+    return removed
+
+
+# Clones created by THIS process. They are never treated as orphans by
+# cleanup_orphan_clones(); each session removes its own clone explicitly.
+_LIVE_CLONES: set[Path] = set()
+
+
+def cleanup_orphan_clones(
+    min_age_seconds: float = 900, tmp_root: Path | None = None
+) -> int:
+    """Delete leftover profile clones that do not belong to this run.
+
+    Every session deletes its own clone on graceful exit, so after a session
+    finishes, anything left under bing-rewards-profile-* is either an orphan
+    from an interrupted/crashed run or belongs to a concurrent live run.
+    We remove only clones that are (a) not owned by this process and (b)
+    older than min_age_seconds — a live sibling session keeps writing to its
+    profile, so its directory is always fresh. Returns how many directories
+    were removed.
+    """
+    removed = 0
+    root = tmp_root or Path(tempfile.gettempdir())
+    cutoff = time.time() - min_age_seconds
+    for child in root.iterdir():
+        if not child.name.startswith('bing-rewards-profile-'):
+            continue
+        if child in _LIVE_CLONES:
+            continue
+        try:
+            if child.stat().st_mtime < cutoff:
+                shutil.rmtree(child, ignore_errors=True)
+                removed += 1
+        except OSError:
+            continue
+    if removed:
+        logger.info('cleaned up %d orphan temp profile clone(s)', removed)
+    return removed
+
+
 def clone_profile(source: Path) -> Path:
     """Copy a profile directory to a fresh temp dir and return its path.
 
@@ -150,6 +211,7 @@ def clone_profile(source: Path) -> Path:
     while automation never touches (or can corrupt) the profile in daily use.
     """
     dest = Path(tempfile.mkdtemp(prefix='bing-rewards-profile-'))
+    _LIVE_CLONES.add(dest)
 
     def _ignore(path, names):
         # Exclude the heavy storage/ tree and extensions/ to keep the clone

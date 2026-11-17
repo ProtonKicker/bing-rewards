@@ -16,10 +16,12 @@ from bing_rewards.bing_news import BingNewsResult, run_bing_news
 from bing_rewards.daily_set import DailySetResult, run_daily_set
 from bing_rewards.outlook import OutlookResult, run_outlook_emails
 from bing_rewards.firefox import (
+    cleanup_orphan_clones,
     clone_profile,
     find_profile_directory,
     firefox_is_running,
     kill_firefox_pids,
+    prune_stale_clones,
     quit_driver,
     quit_firefox,
     running_firefox_pids,
@@ -48,6 +50,12 @@ def main(argv: list[str] | None = None) -> int:
         opts.runs_dir = opts.runs_dir / 'dry'
     log = load_or_start(opts.runs_dir)
     shutter = Shutter(None if opts.dry_run else opts.screenshots_dir)
+
+    # Self-heal: purge orphaned temp profile clones from interrupted runs
+    # (each is ~1.6GB). Never touches clones younger than 24h, so a live
+    # run in progress is safe.
+    if not opts.dry_run:
+        prune_stale_clones()
 
     daily_set_result = None
     bing_news_result = None
@@ -130,6 +138,10 @@ def _run_real(opts: opts_mod.Options, log: RunLog, shutter: Shutter) -> tuple[li
                 time.sleep(1.0)
     finally:
         shutil.rmtree(cloned.parent, ignore_errors=True)
+        # Prompt cleanup: after a finished session, sweep any leftover clones
+        # from earlier crashed runs (this run's own clone was just removed;
+        # clones owned by this process or younger than 15 min are kept).
+        cleanup_orphan_clones()
     return results, pre_existing_pids
 
 
@@ -170,6 +182,10 @@ def _run_bing_news_session(
                 kill_firefox_pids(new_pids)
             time.sleep(1.0)
         shutil.rmtree(cloned.parent, ignore_errors=True)
+        # Prompt cleanup: after a finished session, sweep any leftover clones
+        # from earlier crashed runs (this run's own clone was just removed;
+        # clones owned by this process or younger than 15 min are kept).
+        cleanup_orphan_clones()
 
 
 def _run_outlook_session(
@@ -209,6 +225,10 @@ def _run_outlook_session(
                 kill_firefox_pids(new_pids)
             time.sleep(1.0)
         shutil.rmtree(cloned.parent, ignore_errors=True)
+        # Prompt cleanup: after a finished session, sweep any leftover clones
+        # from earlier crashed runs (this run's own clone was just removed;
+        # clones owned by this process or younger than 15 min are kept).
+        cleanup_orphan_clones()
 
 def _run_daily_set_session(
     opts: opts_mod.Options, log: RunLog, shutter: Shutter
@@ -251,6 +271,10 @@ def _run_daily_set_session(
                 kill_firefox_pids(new_pids)
             time.sleep(1.0)
         shutil.rmtree(cloned.parent, ignore_errors=True)
+        # Prompt cleanup: after a finished session, sweep any leftover clones
+        # from earlier crashed runs (this run's own clone was just removed;
+        # clones owned by this process or younger than 15 min are kept).
+        cleanup_orphan_clones()
 
 
 def _run_dry(opts: opts_mod.Options, log: RunLog) -> list[RoundResult]:
